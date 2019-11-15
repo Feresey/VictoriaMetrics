@@ -96,7 +96,7 @@ type Table struct {
 
 	snapshotLock sync.RWMutex
 
-	flockF *os.File
+	flockF *fs.Fslock
 
 	stopCh chan struct{}
 
@@ -256,8 +256,8 @@ func (tb *Table) MustClose() {
 	}
 
 	// Release flockF
-	if err := tb.flockF.Close(); err != nil {
-		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.Name(), err)
+	if err := tb.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.FileName, err)
 	}
 }
 
@@ -420,7 +420,7 @@ const convertToV1280FileName = "converted-to-v1.28.0"
 
 func (tb *Table) convertToV1280() {
 	// Convert tag->metricID rows into tag->metricIDs rows when upgrading to v1.28.0+.
-	flagFilePath := tb.path + "/" + convertToV1280FileName
+	flagFilePath := filepath.Join(tb.path, convertToV1280FileName)
 	if fs.IsPathExist(flagFilePath) {
 		// The conversion has been already performed.
 		return
@@ -766,7 +766,7 @@ func (tb *Table) mergeParts(pws []*partWrapper, stopCh <-chan struct{}, isOuterP
 
 	// Prepare blockStreamWriter for destination part.
 	mergeIdx := tb.nextMergeIdx()
-	tmpPartPath := fmt.Sprintf("%s/tmp/%016X", tb.path, mergeIdx)
+	tmpPartPath := fmt.Sprintf(filepath.FromSlash("%s/tmp/%016X"), tb.path, mergeIdx)
 	bsw := getBlockStreamWriter()
 	compressLevel := getCompressLevelForPartItems(outItemsCount)
 	if err := bsw.InitFromFilePart(tmpPartPath, nocache, compressLevel); err != nil {
@@ -803,7 +803,7 @@ func (tb *Table) mergeParts(pws []*partWrapper, stopCh <-chan struct{}, isOuterP
 	}
 	dstPartPath := ph.Path(tb.path, mergeIdx)
 	fmt.Fprintf(&bb, "%s -> %s\n", tmpPartPath, dstPartPath)
-	txnPath := fmt.Sprintf("%s/txn/%016X", tb.path, mergeIdx)
+	txnPath := fmt.Sprintf(filepath.FromSlash("%s/txn/%016X"), tb.path, mergeIdx)
 	if err := fs.WriteFileAtomically(txnPath, bb.B); err != nil {
 		return fmt.Errorf("cannot create transaction file %q: %s", txnPath, err)
 	}
@@ -928,13 +928,13 @@ func openParts(path string) ([]*partWrapper, error) {
 		return nil, fmt.Errorf("cannot run transactions: %s", err)
 	}
 
-	txnDir := path + "/txn"
+	txnDir := filepath.Join(path, "txn")
 	fs.MustRemoveAll(txnDir)
 	if err := fs.MkdirAllFailIfExist(txnDir); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", txnDir, err)
 	}
 
-	tmpDir := path + "/tmp"
+	tmpDir := filepath.Join(path, "tmp")
 	fs.MustRemoveAll(tmpDir)
 	if err := fs.MkdirAllFailIfExist(tmpDir); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", tmpDir, err)
@@ -958,7 +958,7 @@ func openParts(path string) ([]*partWrapper, error) {
 			// Skip special dirs.
 			continue
 		}
-		partPath := path + "/" + fn
+		partPath := filepath.Join(path, fn)
 		p, err := openFilePart(partPath)
 		if err != nil {
 			mustCloseParts(pws)
@@ -1001,7 +1001,7 @@ func (tb *Table) CreateSnapshotAt(dstDir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot obtain absolute dir for %q: %s", dstDir, err)
 	}
-	if strings.HasPrefix(dstDir, srcDir+"/") {
+	if strings.HasPrefix(dstDir, srcDir+string(os.PathSeparator)) {
 		return fmt.Errorf("cannot create snapshot %q inside the data dir %q", dstDir, srcDir)
 	}
 
@@ -1032,8 +1032,8 @@ func (tb *Table) CreateSnapshotAt(dstDir string) error {
 		if !fs.IsDirOrSymlink(fi) {
 			switch fn {
 			case convertToV1280FileName:
-				srcPath := srcDir + "/" + fn
-				dstPath := dstDir + "/" + fn
+				srcPath := filepath.Join(srcDir, fn)
+				dstPath := filepath.Join(dstDir, fn)
 				if err := os.Link(srcPath, dstPath); err != nil {
 					return fmt.Errorf("cannot hard link from %q to %q: %s", srcPath, dstPath, err)
 				}
@@ -1046,8 +1046,8 @@ func (tb *Table) CreateSnapshotAt(dstDir string) error {
 			// Skip special dirs.
 			continue
 		}
-		srcPartPath := srcDir + "/" + fn
-		dstPartPath := dstDir + "/" + fn
+		srcPartPath := filepath.Join(srcDir, fn)
+		dstPartPath := filepath.Join(dstDir, fn)
 		if err := fs.HardLinkFiles(srcPartPath, dstPartPath); err != nil {
 			return fmt.Errorf("cannot create hard links from %q to %q: %s", srcPartPath, dstPartPath, err)
 		}
@@ -1068,7 +1068,7 @@ func runTransactions(txnLock *sync.RWMutex, path string) error {
 	// Make sure all the current transaction deletions are finished before exiting.
 	defer pendingTxnDeletionsWG.Wait()
 
-	txnDir := path + "/txn"
+	txnDir := filepath.Join(path, "txn")
 	d, err := os.Open(txnDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1094,7 +1094,7 @@ func runTransactions(txnLock *sync.RWMutex, path string) error {
 			// Skip temporary files, which could be left after unclean shutdown.
 			continue
 		}
-		txnPath := txnDir + "/" + fn
+		txnPath := filepath.Join(txnDir, fn)
 		if err := runTransaction(txnLock, path, txnPath); err != nil {
 			return fmt.Errorf("cannot run transaction from %q: %s", txnPath, err)
 		}
@@ -1191,8 +1191,9 @@ func validatePath(pathPrefix, path string) (string, error) {
 	if err != nil {
 		return path, fmt.Errorf("cannot determine absolute path for %q: %s", path, err)
 	}
-	if !strings.HasPrefix(path, pathPrefix+"/") {
-		return path, fmt.Errorf("invalid path %q; must start with %q", path, pathPrefix+"/")
+	pathDir := pathPrefix + string(os.PathSeparator)
+	if !strings.HasPrefix(path, pathDir) {
+		return path, fmt.Errorf("invalid path %q; must start with %q", path, pathDir)
 	}
 	return path, nil
 }

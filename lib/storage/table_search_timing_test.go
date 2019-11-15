@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -42,7 +43,7 @@ func BenchmarkTableSearch(b *testing.B) {
 func openBenchTable(b *testing.B, startTimestamp int64, rowsPerInsert, rowsCount, tsidsCount int) *table {
 	b.Helper()
 
-	path := fmt.Sprintf("./benchmarkTableSearch/rows%d_tsids%d", rowsCount, tsidsCount)
+	path := fmt.Sprintf(filepath.FromSlash("./benchmarkTableSearch/rows%d_tsids%d"), rowsCount, tsidsCount)
 	if !createdBenchTables[path] {
 		createBenchTable(b, path, startTimestamp, rowsPerInsert, rowsCount, tsidsCount)
 		createdBenchTables[path] = true

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -697,7 +698,7 @@ func TestStorageAddRows(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %s", err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(15 * time.Second):
 				t.Fatalf("timeout")
 			}
 		}
@@ -761,7 +762,7 @@ func testStorageAddRows(s *Storage) error {
 	}
 
 	// Try opening the storage from snapshot.
-	snapshotPath := s.path + "/snapshots/" + snapshotName
+	snapshotPath := filepath.Join(s.path, "snapshots", snapshotName)
 	s1, err := OpenStorage(snapshotPath, 0)
 	if err != nil {
 		return fmt.Errorf("cannot open storage from snapshot: %s", err)

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -167,17 +168,17 @@ func testPartitionSearchEx(t *testing.T, ptt int64, tr TimeRange, partsCount, ma
 	})
 
 	// Create partition from rowss and test search on it.
-	pt, err := createPartition(ptt, "./small-table", "./big-table", nilGetDeletedMetricIDs)
+	pt, err := createPartition(ptt, filepath.FromSlash("./small-table"), filepath.FromSlash("./big-table"), nilGetDeletedMetricIDs)
 	if err != nil {
 		t.Fatalf("cannot create partition: %s", err)
 	}
 	smallPartsPath := pt.smallPartsPath
 	bigPartsPath := pt.bigPartsPath
 	defer func() {
-		if err := os.RemoveAll("./small-table"); err != nil {
+		if err := os.RemoveAll(filepath.FromSlash("./small-table")); err != nil {
 			t.Fatalf("cannot remove small parts directory: %s", err)
 		}
-		if err := os.RemoveAll("./big-table"); err != nil {
+		if err := os.RemoveAll(filepath.FromSlash("./big-table")); err != nil {
 			t.Fatalf("cannot remove big parts directory: %s", err)
 		}
 	}()

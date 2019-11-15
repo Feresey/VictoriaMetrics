@@ -192,8 +192,8 @@ func (pw *partWrapper) decRef() {
 // to small and big partitions.
 func createPartition(timestamp int64, smallPartitionsPath, bigPartitionsPath string, getDeletedMetricIDs func() *uint64set.Set) (*partition, error) {
 	name := timestampToPartitionName(timestamp)
-	smallPartsPath := filepath.Clean(smallPartitionsPath) + "/" + name
-	bigPartsPath := filepath.Clean(bigPartitionsPath) + "/" + name
+	smallPartsPath := filepath.Join(filepath.Clean(smallPartitionsPath), name)
+	bigPartsPath := filepath.Join(filepath.Clean(bigPartitionsPath), name)
 	logger.Infof("creating a partition %q with smallPartsPath=%q, bigPartsPath=%q", name, smallPartsPath, bigPartsPath)
 
 	if err := createPartitionDirs(smallPartsPath); err != nil {
@@ -229,13 +229,13 @@ func openPartition(smallPartsPath, bigPartsPath string, getDeletedMetricIDs func
 	smallPartsPath = filepath.Clean(smallPartsPath)
 	bigPartsPath = filepath.Clean(bigPartsPath)
 
-	n := strings.LastIndexByte(smallPartsPath, '/')
+	n := strings.LastIndexByte(smallPartsPath, os.PathSeparator)
 	if n < 0 {
 		return nil, fmt.Errorf("cannot find partition name from smallPartsPath %q; must be in the form /path/to/smallparts/YYYY_MM", smallPartsPath)
 	}
 	name := smallPartsPath[n+1:]
 
-	if !strings.HasSuffix(bigPartsPath, "/"+name) {
+	if !strings.HasSuffix(bigPartsPath, string(os.PathSeparator)+name) {
 		return nil, fmt.Errorf("patititon name in bigPartsPath %q doesn't match smallPartsPath %q; want %q", bigPartsPath, smallPartsPath, name)
 	}
 
@@ -1064,7 +1064,7 @@ func (pt *partition) mergeParts(pws []*partWrapper, stopCh <-chan struct{}) erro
 	}
 	ptPath = filepath.Clean(ptPath)
 	mergeIdx := pt.nextMergeIdx()
-	tmpPartPath := fmt.Sprintf("%s/tmp/%016X", ptPath, mergeIdx)
+	tmpPartPath := fmt.Sprintf(filepath.FromSlash("%s/tmp/%016X"), ptPath, mergeIdx)
 	bsw := getBlockStreamWriter()
 	compressLevel := getCompressLevelForRowsCount(outRowsCount)
 	if err := bsw.InitFromFilePart(tmpPartPath, nocache, compressLevel); err != nil {
@@ -1110,7 +1110,7 @@ func (pt *partition) mergeParts(pws []*partWrapper, stopCh <-chan struct{}) erro
 		dstPartPath = ph.Path(ptPath, mergeIdx)
 	}
 	fmt.Fprintf(&bb, "%s -> %s\n", tmpPartPath, dstPartPath)
-	txnPath := fmt.Sprintf("%s/txn/%016X", ptPath, mergeIdx)
+	txnPath := fmt.Sprintf(filepath.FromSlash("%s/txn/%016X"), ptPath, mergeIdx)
 	if err := fs.WriteFileAtomically(txnPath, bb.B); err != nil {
 		return fmt.Errorf("cannot create transaction file %q: %s", txnPath, err)
 	}
@@ -1327,9 +1327,9 @@ func openParts(pathPrefix1, pathPrefix2, path string) ([]*partWrapper, error) {
 		return nil, fmt.Errorf("cannot run transactions from %q: %s", path, err)
 	}
 
-	txnDir := path + "/txn"
+	txnDir := filepath.Join(path, "txn")
 	fs.MustRemoveAll(txnDir)
-	tmpDir := path + "/tmp"
+	tmpDir := filepath.Join(path, "tmp")
 	fs.MustRemoveAll(tmpDir)
 	if err := createPartitionDirs(path); err != nil {
 		return nil, fmt.Errorf("cannot create directories for partition %q: %s", path, err)
@@ -1352,7 +1352,7 @@ func openParts(pathPrefix1, pathPrefix2, path string) ([]*partWrapper, error) {
 			// Skip special dirs.
 			continue
 		}
-		partPath := path + "/" + fn
+		partPath := filepath.Join(path, fn)
 		startTime := time.Now()
 		p, err := openFilePart(partPath)
 		if err != nil {
@@ -1436,8 +1436,8 @@ func (pt *partition) createSnapshot(srcDir, dstDir string) error {
 			// Skip special dirs.
 			continue
 		}
-		srcPartPath := srcDir + "/" + fn
-		dstPartPath := dstDir + "/" + fn
+		srcPartPath := filepath.Join(srcDir, fn)
+		dstPartPath := filepath.Join(dstDir, fn)
 		if err := fs.HardLinkFiles(srcPartPath, dstPartPath); err != nil {
 			return fmt.Errorf("cannot create hard links from %q to %q: %s", srcPartPath, dstPartPath, err)
 		}
@@ -1456,7 +1456,7 @@ func runTransactions(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, path strin
 	// Make sure all the current transaction deletions are finished before exiting.
 	defer pendingTxnDeletionsWG.Wait()
 
-	txnDir := path + "/txn"
+	txnDir := filepath.Join(path, "txn")
 	d, err := os.Open(txnDir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1482,7 +1482,7 @@ func runTransactions(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, path strin
 			// Skip temporary files, which could be left after unclean shutdown.
 			continue
 		}
-		txnPath := txnDir + "/" + fn
+		txnPath := filepath.Join(txnDir, fn)
 		if err := runTransaction(txnLock, pathPrefix1, pathPrefix2, txnPath); err != nil {
 			return fmt.Errorf("cannot run transaction from %q: %s", txnPath, err)
 		}
@@ -1590,19 +1590,21 @@ func validatePath(pathPrefix1, pathPrefix2, path string) (string, error) {
 	if err != nil {
 		return path, fmt.Errorf("cannot determine absolute path for %q: %s", path, err)
 	}
-	if !strings.HasPrefix(path, pathPrefix1+"/") && !strings.HasPrefix(path, pathPrefix2+"/") {
-		return path, fmt.Errorf("invalid path %q; must start with either %q or %q", path, pathPrefix1+"/", pathPrefix2+"/")
+	pathPrefix1Dir := pathPrefix1 + string(os.PathSeparator)
+	pathPrefix2Dir := pathPrefix2 + string(os.PathSeparator)
+	if !strings.HasPrefix(path, pathPrefix1Dir) && !strings.HasPrefix(path, pathPrefix2Dir) {
+		return path, fmt.Errorf("invalid path %q; must start with either %q or %q", path, pathPrefix1Dir, pathPrefix2Dir)
 	}
 	return path, nil
 }
 
 func createPartitionDirs(path string) error {
 	path = filepath.Clean(path)
-	txnPath := path + "/txn"
+	txnPath := filepath.Join(path, "txn")
 	if err := fs.MkdirAllFailIfExist(txnPath); err != nil {
 		return fmt.Errorf("cannot create txn directory %q: %s", txnPath, err)
 	}
-	tmpPath := path + "/tmp"
+	tmpPath := filepath.Join(path, "tmp")
 	if err := fs.MkdirAllFailIfExist(tmpPath); err != nil {
 		return fmt.Errorf("cannot create tmp directory %q: %s", tmpPath, err)
 	}

@@ -24,7 +24,7 @@ type table struct {
 	ptws     []*partitionWrapper
 	ptwsLock sync.Mutex
 
-	flockF *os.File
+	flockF *fs.Fslock
 
 	stop chan struct{}
 
@@ -95,19 +95,19 @@ func openTable(path string, retentionMonths int, getDeletedMetricIDs func() *uin
 	}
 
 	// Create directories for small and big partitions if they don't exist yet.
-	smallPartitionsPath := path + "/small"
+	smallPartitionsPath := filepath.Join(path, "small")
 	if err := fs.MkdirAllIfNotExist(smallPartitionsPath); err != nil {
 		return nil, fmt.Errorf("cannot create directory for small partitions %q: %s", smallPartitionsPath, err)
 	}
-	smallSnapshotsPath := smallPartitionsPath + "/snapshots"
+	smallSnapshotsPath := filepath.Join(smallPartitionsPath, "snapshots")
 	if err := fs.MkdirAllIfNotExist(smallSnapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", smallSnapshotsPath, err)
 	}
-	bigPartitionsPath := path + "/big"
+	bigPartitionsPath := filepath.Join(path, "big")
 	if err := fs.MkdirAllIfNotExist(bigPartitionsPath); err != nil {
 		return nil, fmt.Errorf("cannot create directory for big partitions %q: %s", bigPartitionsPath, err)
 	}
-	bigSnapshotsPath := bigPartitionsPath + "/snapshots"
+	bigSnapshotsPath := filepath.Join(bigPartitionsPath, "snapshots")
 	if err := fs.MkdirAllIfNotExist(bigSnapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", bigSnapshotsPath, err)
 	}
@@ -148,18 +148,18 @@ func (tb *table) CreateSnapshot(snapshotName string) (string, string, error) {
 	ptws := tb.GetPartitions(nil)
 	defer tb.PutPartitions(ptws)
 
-	dstSmallDir := fmt.Sprintf("%s/small/snapshots/%s", tb.path, snapshotName)
+	dstSmallDir := fmt.Sprintf(filepath.FromSlash("%s/small/snapshots/%s"), tb.path, snapshotName)
 	if err := fs.MkdirAllFailIfExist(dstSmallDir); err != nil {
 		return "", "", fmt.Errorf("cannot create dir %q: %s", dstSmallDir, err)
 	}
-	dstBigDir := fmt.Sprintf("%s/big/snapshots/%s", tb.path, snapshotName)
+	dstBigDir := fmt.Sprintf(filepath.FromSlash("%s/big/snapshots/%s"), tb.path, snapshotName)
 	if err := fs.MkdirAllFailIfExist(dstBigDir); err != nil {
 		return "", "", fmt.Errorf("cannot create dir %q: %s", dstBigDir, err)
 	}
 
 	for _, ptw := range ptws {
-		smallPath := dstSmallDir + "/" + ptw.pt.name
-		bigPath := dstBigDir + "/" + ptw.pt.name
+		smallPath := filepath.Join(dstSmallDir, ptw.pt.name)
+		bigPath := filepath.Join(dstBigDir, ptw.pt.name)
 		if err := ptw.pt.CreateSnapshotAt(smallPath, bigPath); err != nil {
 			return "", "", fmt.Errorf("cannot create snapshot for partition %q in %q: %s", ptw.pt.name, tb.path, err)
 		}
@@ -176,9 +176,9 @@ func (tb *table) CreateSnapshot(snapshotName string) (string, string, error) {
 
 // MustDeleteSnapshot deletes snapshot with the given snapshotName.
 func (tb *table) MustDeleteSnapshot(snapshotName string) {
-	smallDir := fmt.Sprintf("%s/small/snapshots/%s", tb.path, snapshotName)
+	smallDir := fmt.Sprintf(filepath.FromSlash("%s/small/snapshots/%s"), tb.path, snapshotName)
 	fs.MustRemoveAll(smallDir)
-	bigDir := fmt.Sprintf("%s/big/snapshots/%s", tb.path, snapshotName)
+	bigDir := fmt.Sprintf(filepath.FromSlash("%s/big/snapshots/%s"), tb.path, snapshotName)
 	fs.MustRemoveAll(bigDir)
 }
 
@@ -207,8 +207,8 @@ func (tb *table) MustClose() {
 	}
 
 	// Release exclusive lock on the table.
-	if err := tb.flockF.Close(); err != nil {
-		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.Name(), err)
+	if err := tb.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.FileName, err)
 	}
 }
 
@@ -447,8 +447,8 @@ func openPartitions(smallPartitionsPath, bigPartitionsPath string, getDeletedMet
 	}
 	var pts []*partition
 	for ptName := range ptNames {
-		smallPartsPath := smallPartitionsPath + "/" + ptName
-		bigPartsPath := bigPartitionsPath + "/" + ptName
+		smallPartsPath := filepath.Join(smallPartitionsPath, ptName)
+		bigPartsPath := filepath.Join(bigPartitionsPath, ptName)
 		pt, err := openPartition(smallPartsPath, bigPartsPath, getDeletedMetricIDs)
 		if err != nil {
 			mustClosePartitions(pts)

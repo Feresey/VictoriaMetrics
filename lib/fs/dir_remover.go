@@ -20,8 +20,12 @@ func mustRemoveAll(path string, done func()) bool {
 		done()
 		return true
 	}
+	if err.Error() == "Sharing violation." {
+		time.Sleep(time.Millisecond)
+		goto remover
+	}
 	if !isTemporaryNFSError(err) {
-		logger.Panicf("FATAL: cannot remove %q: %s", path, err)
+		logger.Panicf("FATAL: cannot remove %q: %q", path, err)
 	}
 	// NFS prevents from removing directories with open files.
 	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/61 .

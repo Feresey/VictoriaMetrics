@@ -43,7 +43,7 @@ func (r *Restore) Run() error {
 	if err != nil {
 		return fmt.Errorf("cannot create lock file in %q; make sure VictoriaMetrics doesn't use the dir; error: %s", r.Dst.Dir, err)
 	}
-	defer fs.MustClose(flockF)
+	defer func() { _ = flockF.Unlock() }()
 
 	concurrency := r.Concurrency
 	src := r.Src

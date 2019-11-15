@@ -57,7 +57,7 @@ func (fs *FS) ListParts() ([]common.Part, error) {
 	}
 
 	var parts []common.Part
-	dir += "/"
+	dir += string(os.PathSeparator)
 	for _, file := range files {
 		if !strings.HasPrefix(file, dir) {
 			logger.Panicf("BUG: unexpected prefix for file %q; want %q", file, dir)
@@ -177,10 +177,10 @@ func (fs *FS) mkdirAll(filePath string) error {
 
 func (fs *FS) path(p common.Part) string {
 	dir := fs.Dir
-	for strings.HasSuffix(dir, "/") {
+	for strings.HasSuffix(dir, string(os.PathSeparator)) {
 		dir = dir[:len(dir)-1]
 	}
-	return fs.Dir + "/" + p.Path
+	return filepath.Join(fs.Dir, p.Path)
 }
 
 type limitedReadCloser struct {

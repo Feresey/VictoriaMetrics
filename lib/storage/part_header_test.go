@@ -1,13 +1,14 @@
 package storage
 
 import (
+	"path/filepath"
 	"testing"
 )
 
 func TestPartHeaderParseFromPath(t *testing.T) {
 	testParseFromPathError := func(path string) {
 		t.Helper()
-
+		path = filepath.FromSlash(path)
 		var ph partHeader
 		if err := ph.ParseFromPath(path); err == nil {
 			t.Fatalf("expecting non-nil error")

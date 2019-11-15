@@ -43,7 +43,7 @@ type Storage struct {
 	retentionMonths int
 
 	// lock file for exclusive access to the storage on the given path.
-	flockF *os.File
+	flockF *fs.Fslock
 
 	idbCurr atomic.Value
 
@@ -92,7 +92,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 
 	s := &Storage{
 		path:            path,
-		cachePath:       path + "/cache",
+		cachePath:       filepath.Join(path, "cache"),
 		retentionMonths: retentionMonths,
 
 		stop: make(chan struct{}),
@@ -101,7 +101,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	if err := fs.MkdirAllIfNotExist(path); err != nil {
 		return nil, fmt.Errorf("cannot create a directory for the storage at %q: %s", path, err)
 	}
-	snapshotsPath := path + "/snapshots"
+	snapshotsPath := filepath.Join(path, "snapshots")
 	if err := fs.MkdirAllIfNotExist(snapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", snapshotsPath, err)
 	}
@@ -128,8 +128,8 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	s.pendingHourEntries = &uint64set.Set{}
 
 	// Load indexdb
-	idbPath := path + "/indexdb"
-	idbSnapshotsPath := idbPath + "/snapshots"
+	idbPath := filepath.Join(path, "indexdb")
+	idbSnapshotsPath := filepath.Join(idbPath, "snapshots")
 	if err := fs.MkdirAllIfNotExist(idbSnapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", idbSnapshotsPath, err)
 	}
@@ -141,7 +141,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	s.idbCurr.Store(idbCurr)
 
 	// Load data
-	tablePath := path + "/data"
+	tablePath := filepath.Join(path, "data")
 	tb, err := openTable(tablePath, retentionMonths, s.getDeletedMetricIDs)
 	if err != nil {
 		s.idb().MustClose()
@@ -172,11 +172,11 @@ func (s *Storage) CreateSnapshot() (string, error) {
 
 	snapshotName := fmt.Sprintf("%s-%08X", time.Now().UTC().Format("20060102150405"), nextSnapshotIdx())
 	srcDir := s.path
-	dstDir := fmt.Sprintf("%s/snapshots/%s", srcDir, snapshotName)
+	dstDir := fmt.Sprintf(filepath.FromSlash("%s/snapshots/%s"), srcDir, snapshotName)
 	if err := fs.MkdirAllFailIfExist(dstDir); err != nil {
 		return "", fmt.Errorf("cannot create dir %q: %s", dstDir, err)
 	}
-	dstDataDir := dstDir + "/data"
+	dstDataDir := filepath.Join(dstDir, "data")
 	if err := fs.MkdirAllFailIfExist(dstDataDir); err != nil {
 		return "", fmt.Errorf("cannot create dir %q: %s", dstDataDir, err)
 	}
@@ -185,36 +185,36 @@ func (s *Storage) CreateSnapshot() (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("cannot create table snapshot: %s", err)
 	}
-	dstSmallDir := dstDataDir + "/small"
+	dstSmallDir := filepath.Join(dstDataDir, "small")
 	if err := fs.SymlinkRelative(smallDir, dstSmallDir); err != nil {
 		return "", fmt.Errorf("cannot create symlink from %q to %q: %s", smallDir, dstSmallDir, err)
 	}
-	dstBigDir := dstDataDir + "/big"
+	dstBigDir := filepath.Join(dstDataDir, "big")
 	if err := fs.SymlinkRelative(bigDir, dstBigDir); err != nil {
 		return "", fmt.Errorf("cannot create symlink from %q to %q: %s", bigDir, dstBigDir, err)
 	}
 	fs.MustSyncPath(dstDataDir)
 
-	idbSnapshot := fmt.Sprintf("%s/indexdb/snapshots/%s", s.path, snapshotName)
+	idbSnapshot := fmt.Sprintf(filepath.FromSlash("%s/indexdb/snapshots/%s"), s.path, snapshotName)
 	idb := s.idb()
-	currSnapshot := idbSnapshot + "/" + idb.name
+	currSnapshot := filepath.Join(idbSnapshot, idb.name)
 	if err := idb.tb.CreateSnapshotAt(currSnapshot); err != nil {
 		return "", fmt.Errorf("cannot create curr indexDB snapshot: %s", err)
 	}
 	ok := idb.doExtDB(func(extDB *indexDB) {
-		prevSnapshot := idbSnapshot + "/" + extDB.name
+		prevSnapshot := filepath.Join(idbSnapshot, extDB.name)
 		err = extDB.tb.CreateSnapshotAt(prevSnapshot)
 	})
 	if ok && err != nil {
 		return "", fmt.Errorf("cannot create prev indexDB snapshot: %s", err)
 	}
-	dstIdbDir := dstDir + "/indexdb"
+	dstIdbDir := filepath.Join(dstDir, "indexdb")
 	if err := fs.SymlinkRelative(idbSnapshot, dstIdbDir); err != nil {
 		return "", fmt.Errorf("cannot create symlink from %q to %q: %s", idbSnapshot, dstIdbDir, err)
 	}
 
 	fs.MustSyncPath(dstDir)
-	fs.MustSyncPath(srcDir + "/snapshots")
+	fs.MustSyncPath(filepath.Join(srcDir, "snapshots"))
 
 	logger.Infof("created Storage snapshot for %q at %q in %s", srcDir, dstDir, time.Since(startTime))
 	return snapshotName, nil
@@ -224,7 +224,7 @@ var snapshotNameRegexp = regexp.MustCompile("^[0-9]{14}-[0-9A-Fa-f]+$")
 
 // ListSnapshots returns sorted list of existing snapshots for s.
 func (s *Storage) ListSnapshots() ([]string, error) {
-	snapshotsPath := s.path + "/snapshots"
+	snapshotsPath := filepath.Join(s.path, "snapshots")
 	d, err := os.Open(snapshotsPath)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %q: %s", snapshotsPath, err)
@@ -251,13 +251,13 @@ func (s *Storage) DeleteSnapshot(snapshotName string) error {
 	if !snapshotNameRegexp.MatchString(snapshotName) {
 		return fmt.Errorf("invalid snapshotName %q", snapshotName)
 	}
-	snapshotPath := s.path + "/snapshots/" + snapshotName
+	snapshotPath := filepath.Join(s.path, "snapshots", snapshotName)
 
 	logger.Infof("deleting snapshot %q...", snapshotPath)
 	startTime := time.Now()
 
 	s.tb.MustDeleteSnapshot(snapshotName)
-	idbPath := fmt.Sprintf("%s/indexdb/snapshots/%s", s.path, snapshotName)
+	idbPath := fmt.Sprintf(filepath.FromSlash("%s/indexdb/snapshots/%s"), s.path, snapshotName)
 	fs.MustRemoveAll(idbPath)
 	fs.MustRemoveAll(snapshotPath)
 
@@ -423,7 +423,7 @@ func (s *Storage) currHourMetricIDsUpdater() {
 func (s *Storage) mustRotateIndexDB() {
 	// Create new indexdb table.
 	newTableName := nextIndexDBTableName()
-	idbNewPath := s.path + "/indexdb/" + newTableName
+	idbNewPath := filepath.Join(s.path, "indexdb", newTableName)
 	idbNew, err := openIndexDB(idbNewPath, s.metricIDCache, s.metricNameCache, &s.currHourMetricIDs, &s.prevHourMetricIDs)
 	if err != nil {
 		logger.Panicf("FATAL: cannot create new indexDB at %q: %s", idbNewPath, err)
@@ -474,13 +474,13 @@ func (s *Storage) MustClose() {
 	s.mustSaveHourMetricIDs(hmPrev, "prev_hour_metric_ids")
 
 	// Release lock file.
-	if err := s.flockF.Close(); err != nil {
-		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.Name(), err)
+	if err := s.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.FileName, err)
 	}
 }
 
 func (s *Storage) mustLoadHourMetricIDs(hour uint64, name string) *hourMetricIDs {
-	path := s.cachePath + "/" + name
+	path := filepath.Join(s.cachePath, name)
 	logger.Infof("loading %s from %q...", name, path)
 	startTime := time.Now()
 	if !fs.IsPathExist(path) {
@@ -538,7 +538,7 @@ func (s *Storage) mustLoadHourMetricIDs(hour uint64, name string) *hourMetricIDs
 }
 
 func (s *Storage) mustSaveHourMetricIDs(hm *hourMetricIDs, name string) {
-	path := s.cachePath + "/" + name
+	path := filepath.Join(s.cachePath, name)
 	logger.Infof("saving %s to %q...", name, path)
 	startTime := time.Now()
 	dst := make([]byte, 0, hm.m.Len()*8+24)
@@ -564,7 +564,7 @@ func (s *Storage) mustSaveHourMetricIDs(hm *hourMetricIDs, name string) {
 }
 
 func (s *Storage) mustLoadCache(info, name string, sizeBytes int) *workingsetcache.Cache {
-	path := s.cachePath + "/" + name
+	path := filepath.Join(s.cachePath, name)
 	logger.Infof("loading %s cache from %q...", info, path)
 	startTime := time.Now()
 	c := workingsetcache.Load(path, sizeBytes, time.Hour)
@@ -576,7 +576,7 @@ func (s *Storage) mustLoadCache(info, name string, sizeBytes int) *workingsetcac
 }
 
 func (s *Storage) mustSaveAndStopCache(c *workingsetcache.Cache, info, name string) {
-	path := s.cachePath + "/" + name
+	path := filepath.Join(s.cachePath, name)
 	logger.Infof("saving %s cache to %q...", info, path)
 	startTime := time.Now()
 	if err := c.Save(path); err != nil {
@@ -819,6 +819,7 @@ func (s *Storage) add(rows []rawRow, mrs []MetricRow, precisionBits uint8) ([]ra
 			continue
 		}
 		if mr.Timestamp < minTimestamp {
+			//!!!
 			// Skip rows with too small timestamps outside the retention.
 			lastWarn = fmt.Errorf("cannot insert row with too small timestamp %d outside the retention; minimum allowed timestamp is %d", mr.Timestamp, minTimestamp)
 			atomic.AddUint64(&s.tooSmallTimestampRows, 1)
@@ -1204,7 +1205,7 @@ func openIndexDBTables(path string, metricIDCache, metricNameCache *workingsetca
 
 	// Remove all the tables except two last tables.
 	for _, tn := range tableNames[:len(tableNames)-2] {
-		pathToRemove := path + "/" + tn
+		pathToRemove := filepath.Join(path, tn)
 		logger.Infof("removing obsolete indexdb dir %q...", pathToRemove)
 		fs.MustRemoveAll(pathToRemove)
 		logger.Infof("removed obsolete indexdb dir %q", pathToRemove)
@@ -1214,13 +1215,13 @@ func openIndexDBTables(path string, metricIDCache, metricNameCache *workingsetca
 	fs.MustSyncPath(path)
 
 	// Open the last two tables.
-	currPath := path + "/" + tableNames[len(tableNames)-1]
+	currPath := filepath.Join(path, tableNames[len(tableNames)-1])
 
 	curr, err = openIndexDB(currPath, metricIDCache, metricNameCache, currHourMetricIDs, prevHourMetricIDs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot open curr indexdb table at %q: %s", currPath, err)
 	}
-	prevPath := path + "/" + tableNames[len(tableNames)-2]
+	prevPath := filepath.Join(path, tableNames[len(tableNames)-2])
 	prev, err = openIndexDB(prevPath, metricIDCache, metricNameCache, currHourMetricIDs, prevHourMetricIDs)
 	if err != nil {
 		curr.MustClose()

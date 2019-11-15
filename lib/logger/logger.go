@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -121,9 +122,10 @@ func logMessage(level, msg string, skipframes int) {
 		file = "???"
 		line = 0
 	}
-	if n := strings.Index(file, "/VictoriaMetrics/"); n >= 0 {
+	path := filepath.FromSlash("/VictoriaMetrics/")
+	if n := strings.Index(file, path); n >= 0 {
 		// Strip /VictoriaMetrics/ prefix
-		file = file[n+len("/VictoriaMetrics/"):]
+		file = file[n+len(path):]
 	}
 	for len(msg) > 0 && msg[len(msg)-1] == '\n' {
 		msg = msg[:len(msg)-1]
