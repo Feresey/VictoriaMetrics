@@ -11,7 +11,8 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/filestream"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/metrics"
-	"golang.org/x/sys/unix"
+	"github.com/juju/fslock"
+	// "golang.org/x/sys/unix"
 )
 
 // ReadAtCloser is rand-access read interface.
@@ -338,7 +339,11 @@ func CreateFlockFile(dir string) (*os.File, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create lock file %q: %s", flockFile, err)
 	}
-	if err := unix.Flock(int(flockF.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+
+	winlock := fslock.New(flockFile)
+
+	// fslock.TryLock
+	if err := winlock.Lock(); err != nil {
 		return nil, fmt.Errorf("cannot acquire lock on file %q: %s", flockFile, err)
 	}
 	return flockF, nil
@@ -346,17 +351,18 @@ func CreateFlockFile(dir string) (*os.File, error) {
 
 // MustGetFreeSpace returns free space for the given directory path.
 func MustGetFreeSpace(path string) uint64 {
-	d, err := os.Open(path)
-	if err != nil {
-		logger.Panicf("FATAL: cannot determine free disk space on %q: %s", path, err)
-	}
-	defer MustClose(d)
-
-	fd := d.Fd()
-	var stat unix.Statfs_t
-	if err := unix.Fstatfs(int(fd), &stat); err != nil {
-		logger.Panicf("FATAL: cannot determine free disk space on %q: %s", path, err)
-	}
-	freeSpace := uint64(stat.Bavail) * uint64(stat.Bsize)
-	return freeSpace
+	// d, err := os.Open(path)
+	// if err != nil {
+	// 	logger.Panicf("FATAL: cannot determine free disk space on %q: %s", path, err)
+	// }
+	// defer MustClose(d)
+	//
+	// fd := d.Fd()
+	// var stat unix.Statfs_t
+	// if err := unix.Fstatfs(int(fd), &stat); err != nil {
+	// 	logger.Panicf("FATAL: cannot determine free disk space on %q: %s", path, err)
+	// }
+	// freeSpace := uint64(stat.Bavail) * uint64(stat.Bsize)
+	// return freeSpace
+	return 1
 }

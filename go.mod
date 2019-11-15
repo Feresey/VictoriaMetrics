@@ -6,6 +6,7 @@ require (
 	github.com/cespare/xxhash/v2 v2.1.0
 	github.com/golang/snappy v0.0.1
 	github.com/google/go-cmp v0.3.0 // indirect
+	github.com/juju/fslock v0.0.0-20160525022230-4d5c94c67b4b
 	github.com/klauspost/compress v1.8.3
 	github.com/valyala/fastjson v1.4.1
 	github.com/valyala/gozstd v1.6.2

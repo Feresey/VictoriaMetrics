@@ -6,6 +6,8 @@ github.com/VictoriaMetrics/metrics
 github.com/cespare/xxhash/v2
 # github.com/golang/snappy v0.0.1
 github.com/golang/snappy
+# github.com/juju/fslock v0.0.0-20160525022230-4d5c94c67b4b
+github.com/juju/fslock
 # github.com/klauspost/compress v1.8.3
 github.com/klauspost/compress/fse
 github.com/klauspost/compress/huff0
