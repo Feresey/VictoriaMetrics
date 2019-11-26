@@ -1,3 +1,4 @@
+// + build windows
 package netstorage
 
 import (
@@ -5,5 +6,4 @@ import (
 )
 
 func mustFadviseRandomRead(f *os.File) {
-	// Do nothing :)
 }
