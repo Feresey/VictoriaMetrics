@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io/ioutil"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
@@ -21,7 +22,7 @@ func InitTmpBlocksDir(tmpDirPath string) {
 	if len(tmpDirPath) == 0 {
 		tmpDirPath = os.TempDir()
 	}
-	tmpBlocksDir = tmpDirPath + "/searchResults"
+	tmpBlocksDir = filepath.Join(tmpDirPath, "searchResults")
 	fs.MustRemoveAll(tmpBlocksDir)
 	if err := fs.MkdirAllIfNotExist(tmpBlocksDir); err != nil {
 		logger.Panicf("FATAL: cannot create %q: %s", tmpBlocksDir, err)

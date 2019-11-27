@@ -161,7 +161,7 @@ func load(filePath string, maxBytes int) (*Cache, error) {
 		workersCount++
 		go func(dataPath string) {
 			results <- loadBuckets(c.buckets[:], dataPath, maxBucketChunks)
-		}(filePath + "/" + fn)
+		}(filepath.Join(filePath, fn))
 	}
 	err = nil
 	for i := 0; i < workersCount; i++ {
@@ -177,7 +177,7 @@ func load(filePath string, maxBytes int) (*Cache, error) {
 }
 
 func saveMetadata(c *Cache, dir string) error {
-	metadataPath := dir + "/metadata.bin"
+	metadataPath := filepath.Join(dir, "metadata.bin")
 	metadataFile, err := os.Create(metadataPath)
 	if err != nil {
 		return fmt.Errorf("cannot create %q: %s", metadataPath, err)
@@ -193,7 +193,7 @@ func saveMetadata(c *Cache, dir string) error {
 }
 
 func loadMetadata(dir string) (uint64, error) {
-	metadataPath := dir + "/metadata.bin"
+	metadataPath := filepath.Join(dir, "metadata.bin")
 	metadataFile, err := os.Open(metadataPath)
 	if err != nil {
 		return 0, fmt.Errorf("cannot open %q: %s", metadataPath, err)
@@ -211,7 +211,7 @@ func loadMetadata(dir string) (uint64, error) {
 var dataFileRegexp = regexp.MustCompile(`^data\.\d+\.bin$`)
 
 func saveBuckets(buckets []bucket, workCh <-chan int, dir string, workerNum int) error {
-	dataPath := fmt.Sprintf("%s/data.%d.bin", dir, workerNum)
+	dataPath := fmt.Sprintf(filepath.FromSlash("%s/data.%d.bin"), dir, workerNum)
 	dataFile, err := os.Create(dataPath)
 	if err != nil {
 		return fmt.Errorf("cannot create %q: %s", dataPath, err)

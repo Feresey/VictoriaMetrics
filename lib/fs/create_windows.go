@@ -14,7 +14,7 @@ import (
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
 func CreateFlockFile(dir string) (*os.File, error) {
-	flockFile := filepath.FromSlash(dir + "/flock.lock")
+	flockFile := filepath.Join(dir , "flock.lock")
 	flockF, err := os.Create(flockFile)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create lock file %q: %s", flockFile, err)

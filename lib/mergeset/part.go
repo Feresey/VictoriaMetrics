@@ -68,14 +68,14 @@ func openFilePart(path string) (*part, error) {
 		return nil, fmt.Errorf("cannot parse path to part: %s", err)
 	}
 
-	metaindexPath := path + "/metaindex.bin"
+	metaindexPath := filepath.Join(path, "metaindex.bin")
 	metaindexFile, err := filestream.Open(metaindexPath, true)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open %q: %s", metaindexPath, err)
 	}
 	metaindexSize := fs.MustFileSize(metaindexPath)
 
-	indexPath := path + "/index.bin"
+	indexPath := filepath.Join(path, "index.bin")
 	indexFile, err := fs.OpenReaderAt(indexPath)
 	if err != nil {
 		metaindexFile.MustClose()
@@ -83,7 +83,7 @@ func openFilePart(path string) (*part, error) {
 	}
 	indexSize := fs.MustFileSize(indexPath)
 
-	itemsPath := path + "/items.bin"
+	itemsPath :=filepath.Join( path, "items.bin")
 	itemsFile, err := fs.OpenReaderAt(itemsPath)
 	if err != nil {
 		metaindexFile.MustClose()
@@ -92,7 +92,7 @@ func openFilePart(path string) (*part, error) {
 	}
 	itemsSize := fs.MustFileSize(itemsPath)
 
-	lensPath := path + "/lens.bin"
+	lensPath :=filepath.Join( path, "lens.bin")
 	lensFile, err := fs.OpenReaderAt(lensPath)
 	if err != nil {
 		metaindexFile.MustClose()

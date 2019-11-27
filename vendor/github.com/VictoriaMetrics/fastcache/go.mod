@@ -9,3 +9,5 @@ require (
 	github.com/spaolacci/murmur3 v1.0.1-0.20190317074736-539464a789e9 // indirect
 	github.com/stretchr/testify v1.3.0 // indirect
 )
+
+go 1.13

@@ -198,7 +198,7 @@ func RemoveDirContents(dir string) {
 			// Skip special dirs.
 			continue
 		}
-		fullPath := dir + "/" + name
+		fullPath := filepath.Join(dir, name)
 		MustRemoveAll(fullPath)
 	}
 	MustSyncPath(dir)
@@ -276,8 +276,8 @@ func HardLinkFiles(srcDir, dstDir string) error {
 			continue
 		}
 		fn := fi.Name()
-		srcPath := srcDir + "/" + fn
-		dstPath := dstDir + "/" + fn
+		srcPath := filepath.Join(srcDir, fn)
+		dstPath := filepath.Join(dstDir, fn)
 		if err := os.Link(srcPath, dstPath); err != nil {
 			return err
 		}

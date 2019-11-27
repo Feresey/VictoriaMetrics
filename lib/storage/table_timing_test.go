@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"runtime"
 	"testing"
 	"time"
@@ -43,7 +44,7 @@ func benchmarkTableAddRows(b *testing.B, rowsPerInsert, tsidsCount int) {
 	b.ResetTimer()
 	b.ReportAllocs()
 	b.SetBytes(int64(rowsCountExpected))
-	tablePath := "./benchmarkTableAddRows"
+	tablePath := filepath.FromSlash("./benchmarkTableAddRows")
 	for i := 0; i < b.N; i++ {
 		tb, err := openTable(tablePath, -1, nilGetDeletedMetricIDs)
 		if err != nil {

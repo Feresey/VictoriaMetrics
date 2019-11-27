@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -683,7 +684,7 @@ func testStorageAddRows(s *Storage) error {
 	}
 
 	// Try opening the storage from snapshot.
-	snapshotPath := s.path + "/snapshots/" + snapshotName
+	snapshotPath := filepath.Join(s.path, "snapshots", snapshotName)
 	s1, err := OpenStorage(snapshotPath, 0)
 	if err != nil {
 		return fmt.Errorf("cannot open storage from snapshot: %s", err)

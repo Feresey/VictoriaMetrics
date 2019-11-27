@@ -2,6 +2,7 @@ package storage
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,7 +50,7 @@ const userReadableTimeFormat = "20060102150405.000"
 func (ph *partHeader) Path(prefix string, suffix uint64) string {
 	prefix = filepath.Clean(prefix)
 	s := ph.String()
-	return fmt.Sprintf("%s/%s_%016X", prefix, s, suffix)
+	return fmt.Sprintf(filepath.FromSlash("%s/%s_%016X"), prefix, s, suffix)
 }
 
 // ParseFromPath extracts ph info from the given path.
@@ -59,7 +60,7 @@ func (ph *partHeader) ParseFromPath(path string) error {
 	path = filepath.Clean(path)
 
 	// Extract encoded part name.
-	n := strings.LastIndexByte(path, '/')
+	n := strings.LastIndexByte(path, os.PathSeparator)
 	if n < 0 {
 		return fmt.Errorf("cannot find encoded part name in the path %q", path)
 	}
