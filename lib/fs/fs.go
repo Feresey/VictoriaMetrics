@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sync/atomic"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/filestream"
@@ -76,16 +77,24 @@ var (
 
 // MustSyncPath syncs contents of the given path.
 func MustSyncPath(path string) {
-	d, err := os.Open(path)
-	if err != nil {
-		logger.Panicf("FATAL: cannot open %q: %s", path, err)
-	}
-	if err := d.Sync(); err != nil {
-		_ = d.Close()
-		logger.Panicf("FATAL: cannot flush %q to storage: %s", path, err)
-	}
-	if err := d.Close(); err != nil {
-		logger.Panicf("FATAL: cannot close %q: %s", path, err)
+	file, _ := os.Open(path)
+	stat, _ := file.Stat()
+	logger.Infof("file path %s, isDir: %t", path, stat.IsDir())
+	switch runtime.GOOS {
+	case "windows":
+		break
+	default:
+		d, err := os.Open(path)
+		if err != nil {
+			logger.Panicf("FATAL: cannot open %q: %s", path, err)
+		}
+		if err := d.Sync(); err != nil {
+			_ = d.Close()
+			logger.Panicf("FATAL: cannot flush %q to storage: %s", path, err)
+		}
+		if err := d.Close(); err != nil {
+			logger.Panicf("FATAL: cannot close %q: %s", path, err)
+		}
 	}
 }
 

@@ -89,7 +89,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 
 	s := &Storage{
 		path:            path,
-		cachePath:       filepath.Join(path + "cache"),
+		cachePath:       filepath.Join(path, "cache"),
 		retentionMonths: retentionMonths,
 
 		stop: make(chan struct{}),
@@ -98,7 +98,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	if err := fs.MkdirAllIfNotExist(path); err != nil {
 		return nil, fmt.Errorf("cannot create a directory for the storage at %q: %s", path, err)
 	}
-	snapshotsPath := filepath.Join(path + "snapshots")
+	snapshotsPath := filepath.Join(path, "snapshots")
 	if err := fs.MkdirAllIfNotExist(snapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", snapshotsPath, err)
 	}
@@ -125,8 +125,8 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	s.pendingHourMetricIDs = make(map[uint64]struct{})
 
 	// Load indexdb
-	idbPath := filepath.Join(path + "indexdb")
-	idbSnapshotsPath := filepath.Join(idbPath + "snapshots")
+	idbPath := filepath.Join(path, "indexdb")
+	idbSnapshotsPath := filepath.Join(idbPath, "snapshots")
 	if err := fs.MkdirAllIfNotExist(idbSnapshotsPath); err != nil {
 		return nil, fmt.Errorf("cannot create %q: %s", idbSnapshotsPath, err)
 	}
@@ -138,7 +138,7 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	s.idbCurr.Store(idbCurr)
 
 	// Load data
-	tablePath := filepath.Join(path + "data")
+	tablePath := filepath.Join(path, "data")
 	tb, err := openTable(tablePath, retentionMonths, s.getDeletedMetricIDs)
 	if err != nil {
 		s.idb().MustClose()
@@ -205,7 +205,7 @@ func (s *Storage) CreateSnapshot() (string, error) {
 	if ok && err != nil {
 		return "", fmt.Errorf("cannot create prev indexDB snapshot: %s", err)
 	}
-	dstIdbDir := filepath.Join(dstDir,"indexdb")
+	dstIdbDir := filepath.Join(dstDir, "indexdb")
 	if err := fs.SymlinkRelative(idbSnapshot, dstIdbDir); err != nil {
 		return "", fmt.Errorf("cannot create symlink from %q to %q: %s", idbSnapshot, dstIdbDir, err)
 	}
