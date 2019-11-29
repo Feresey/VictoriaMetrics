@@ -86,7 +86,7 @@ func (ph *partHeader) ParseFromPath(partPath string) error {
 	partPath = filepath.Clean(partPath)
 
 	// Extract encoded part name.
-	n := strings.LastIndexByte(partPath, os.PathListSeparator)
+	n := strings.LastIndexByte(partPath, os.PathSeparator)
 	if n < 0 {
 		return fmt.Errorf("cannot find encoded part name in the path %q", partPath)
 	}

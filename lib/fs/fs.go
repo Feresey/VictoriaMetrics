@@ -77,11 +77,13 @@ var (
 
 // MustSyncPath syncs contents of the given path.
 func MustSyncPath(path string) {
-	file, _ := os.Open(path)
-	stat, _ := file.Stat()
-	logger.Infof("file path %s, isDir: %t", path, stat.IsDir())
+	//! remove
+	if path != filepath.FromSlash(path) {
+		panic(path)
+	}
 	switch runtime.GOOS {
 	case "windows":
+		// dir is not file in windows, so cannot sync dir
 		break
 	default:
 		d, err := os.Open(path)

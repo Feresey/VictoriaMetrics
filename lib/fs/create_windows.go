@@ -34,6 +34,7 @@ func MustGetFreeSpace(path string) uint64 {
 	h := syscall.MustLoadDLL("kernel32.dll")
 	c := h.MustFindProc("GetDiskFreeSpaceExW")
 
+	logger.Infof("Try to get size of :%q", filepath.VolumeName(path))
 	lpFreeBytesAvailable := int64(0)
 	lpTotalNumberOfBytes := int64(0)
 	lpTotalNumberOfFreeBytes := int64(0)
@@ -43,8 +44,9 @@ func MustGetFreeSpace(path string) uint64 {
 		uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)))
 
 	if err.Error() != "Success." {
-		fmt.Println("This is error:",err)
-		logger.Panicf("FATAL: cannot determine free disk space on %q: %#v", path, err)
+		fmt.Println("This is error:", err)
+		logger.Panicf("FATAL: cannot  determine free disk space on %q: %#v", path, err)
 	}
+	logger.Infof("size of :%q is %d", filepath.VolumeName(path), lpFreeBytesAvailable)
 	return uint64(lpFreeBytesAvailable)
 }

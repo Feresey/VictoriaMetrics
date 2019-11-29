@@ -1467,8 +1467,10 @@ func validatePath(pathPrefix1, pathPrefix2, path string) (string, error) {
 	if err != nil {
 		return path, fmt.Errorf("cannot determine absolute path for %q: %s", path, err)
 	}
-	if !strings.HasPrefix(path, pathPrefix1+string(os.PathSeparator)) && !strings.HasPrefix(path, pathPrefix2+"/") {
-		return path, fmt.Errorf("invalid path %q; must start with either %q or %q", path, pathPrefix1+"/", pathPrefix2+"/")
+	pathPrefix1Dir:=pathPrefix1+string(os.PathSeparator)
+	pathPrefix2Dir:=pathPrefix2+string(os.PathSeparator)
+	if !strings.HasPrefix(path, pathPrefix1Dir) && !strings.HasPrefix(path, pathPrefix2Dir) {
+		return path, fmt.Errorf("invalid path %q; must start with either %q or %q", path, pathPrefix1Dir, pathPrefix2Dir)
 	}
 	return path, nil
 }

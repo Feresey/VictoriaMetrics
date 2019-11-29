@@ -793,6 +793,7 @@ func (s *Storage) add(rows []rawRow, mrs []MetricRow, precisionBits uint8) ([]ra
 			continue
 		}
 		if mr.Timestamp < minTimestamp {
+			//!!!
 			// Skip rows with too small timestamps outside the retention.
 			lastError = fmt.Errorf("cannot insert row with too small timestamp %d outside the retention; minimum allowed timestamp is %d", mr.Timestamp, minTimestamp)
 			atomic.AddUint64(&s.tooSmallTimestampRows, 1)

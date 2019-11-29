@@ -12,12 +12,18 @@ import (
 )
 
 func mustRemoveAll(path string) bool {
+
+remover:
 	err := os.RemoveAll(path)
 	if err == nil {
 		// Make sure the parent directory doesn't contain references
 		// to the current directory.
 		mustSyncParentDirIfExists(path)
 		return true
+	}
+	if err.Error() == "Sharing violation." {
+		time.Sleep(time.Millisecond)
+		goto remover
 	}
 	if !isTemporaryNFSError(err) {
 		logger.Panicf("FATAL: cannot remove %q: %s", path, err)

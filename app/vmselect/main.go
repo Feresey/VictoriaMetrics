@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -27,7 +28,7 @@ var (
 
 // Init initializes vmselect
 func Init() {
-	tmpDirPath := *vmstorage.DataPath + "/tmp"
+	tmpDirPath := filepath.Join(*vmstorage.DataPath, "tmp")
 	fs.RemoveDirContents(tmpDirPath)
 	netstorage.InitTmpBlocksDir(tmpDirPath)
 	promql.InitRollupResultCache(*vmstorage.DataPath + "/cache/rollupResult")
