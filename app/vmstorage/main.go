@@ -24,6 +24,9 @@ var (
 
 	// DataPath is a path to storage data.
 	DataPath = flag.String("storageDataPath", "victoria-metrics-data", "Path to storage data")
+
+	bigMergeConcurrency   = flag.Int("bigMergeConcurrency", 0, "The maximum number of CPU cores to use for big merges. Default value is used if set to 0")
+	smallMergeConcurrency = flag.Int("smallMergeConcurrency", 0, "The maximum number of CPU cores to use for small merges. Default value is used if set to 0")
 )
 
 // Init initializes vmstorage.
@@ -39,6 +42,10 @@ func InitWithoutMetrics() {
 	if err := encoding.CheckPrecisionBits(uint8(*precisionBits)); err != nil {
 		logger.Fatalf("invalid `-precisionBits`: %s", err)
 	}
+
+	storage.SetBigMergeWorkersCount(*bigMergeConcurrency)
+	storage.SetSmallMergeWorkersCount(*smallMergeConcurrency)
+
 	logger.Infof("opening storage at %q with retention period %d months", *DataPath, *retentionPeriod)
 	startTime := time.Now()
 	WG = syncwg.WaitGroup{}
@@ -298,6 +305,9 @@ func registerStorageMetrics() {
 		return float64(idbm().PartsRefCount)
 	})
 
+	metrics.NewGauge(`vm_new_timeseries_created_total`, func() float64 {
+		return float64(idbm().NewTimeseriesCreated)
+	})
 	metrics.NewGauge(`vm_missing_tsids_for_metric_id_total`, func() float64 {
 		return float64(idbm().MissingTSIDsForMetricID)
 	})
@@ -312,6 +322,12 @@ func registerStorageMetrics() {
 	})
 	metrics.NewGauge(`vm_date_metric_ids_search_hits_total`, func() float64 {
 		return float64(idbm().DateMetricIDsSearchHits)
+	})
+	metrics.NewGauge(`vm_index_blocks_with_metric_ids_processed_total`, func() float64 {
+		return float64(idbm().IndexBlocksWithMetricIDsProcessed)
+	})
+	metrics.NewGauge(`vm_index_blocks_with_metric_ids_incorrect_order_total`, func() float64 {
+		return float64(idbm().IndexBlocksWithMetricIDsIncorrectOrder)
 	})
 
 	metrics.NewGauge(`vm_assisted_merges_total{type="storage/small"}`, func() float64 {
@@ -391,6 +407,24 @@ func registerStorageMetrics() {
 		return float64(idbm().ItemsCount)
 	})
 
+	metrics.NewGauge(`vm_date_range_search_calls_total`, func() float64 {
+		return float64(idbm().DateRangeSearchCalls)
+	})
+	metrics.NewGauge(`vm_date_range_hits_total`, func() float64 {
+		return float64(idbm().DateRangeSearchHits)
+	})
+
+	metrics.NewGauge(`vm_missing_metric_names_for_metric_id_total`, func() float64 {
+		return float64(idbm().MissingMetricNamesForMetricID)
+	})
+
+	metrics.NewGauge(`vm_date_metric_id_cache_syncs_total`, func() float64 {
+		return float64(m().DateMetricIDCacheSyncsCount)
+	})
+	metrics.NewGauge(`vm_date_metric_id_cache_resets_total`, func() float64 {
+		return float64(m().DateMetricIDCacheResetsCount)
+	})
+
 	metrics.NewGauge(`vm_cache_entries{type="storage/tsid"}`, func() float64 {
 		return float64(m().TSIDCacheSize)
 	})
@@ -440,6 +474,9 @@ func registerStorageMetrics() {
 	metrics.NewGauge(`vm_cache_size_bytes{type="storage/date_metricID"}`, func() float64 {
 		return float64(m().DateMetricIDCacheSizeBytes)
 	})
+	metrics.NewGauge(`vm_cache_size_bytes{type="storage/hour_metric_ids"}`, func() float64 {
+		return float64(m().HourMetricIDCacheSizeBytes)
+	})
 	metrics.NewGauge(`vm_cache_size_bytes{type="indexdb/tagFilters"}`, func() float64 {
 		return float64(idbm().TagCacheSizeBytes)
 	})
@@ -455,9 +492,6 @@ func registerStorageMetrics() {
 	})
 	metrics.NewGauge(`vm_cache_requests_total{type="storage/metricName"}`, func() float64 {
 		return float64(m().MetricNameCacheRequests)
-	})
-	metrics.NewGauge(`vm_cache_requests_total{type="storage/date_metricID"}`, func() float64 {
-		return float64(m().DateMetricIDCacheRequests)
 	})
 	metrics.NewGauge(`vm_cache_requests_total{type="storage/bigIndexBlocks"}`, func() float64 {
 		return float64(tm().BigIndexBlocksCacheRequests)
@@ -490,9 +524,6 @@ func registerStorageMetrics() {
 	metrics.NewGauge(`vm_cache_misses_total{type="storage/metricName"}`, func() float64 {
 		return float64(m().MetricNameCacheMisses)
 	})
-	metrics.NewGauge(`vm_cache_misses_total{type="storage/date_metricID"}`, func() float64 {
-		return float64(m().DateMetricIDCacheMisses)
-	})
 	metrics.NewGauge(`vm_cache_misses_total{type="storage/bigIndexBlocks"}`, func() float64 {
 		return float64(tm().BigIndexBlocksCacheMisses)
 	})
@@ -524,8 +555,5 @@ func registerStorageMetrics() {
 	})
 	metrics.NewGauge(`vm_cache_collisions_total{type="storage/metricName"}`, func() float64 {
 		return float64(m().MetricNameCacheCollisions)
-	})
-	metrics.NewGauge(`vm_cache_collisions_total{type="storage/date_metricID"}`, func() float64 {
-		return float64(m().DateMetricIDCacheCollisions)
 	})
 }

@@ -208,7 +208,7 @@ The `{%s x %}` is used for printing HTML-safe strings, while `{%= F() %}`
 is used for embedding template function calls. Quicktemplate supports also
 other output tags:
 
-  * `{%d num %}` for integers.
+  * `{%d int %}` and `{%dl int64 %}` for integers.
   * `{%f float %}` for float64.
     Floating point precision may be set via `{%f.precision float %}`.
     For example, `{%f.2 1.2345 %}` outputs `1.23`.
@@ -308,6 +308,25 @@ There are other useful tags supported by quicktemplate:
     ```
     <div><div>space between lines</div>and tags<div>is removed unless
     or is used</div></div>
+    ```
+
+  * It is possible removing whitespace before and after the tag by adding `-` after `{%` or prepending `%}` with `-`. For example:
+
+    ```qtpl
+    var sum int
+    {%- for i := 1; i <= 3; i++ -%}
+    sum += {%d i %}
+    {%- endfor -%}
+    return sum
+    ```
+
+    Is converted into:
+    ```
+    var sum int
+    sum += 1
+    sum += 2
+    sum += 3
+    return sum
     ```
 
   * `{% switch %}`, `{% case %}` and `{% default %}`:

@@ -14,7 +14,7 @@ import (
 // grouping of related metrics.
 // It is OK if their meaning differ from their naming.
 type TSID struct {
-	// MetricGroupID is the id of metric group inside the given project.
+	// MetricGroupID is the id of metric group.
 	//
 	// MetricGroupID must be unique.
 	//
@@ -29,8 +29,7 @@ type TSID struct {
 	//   memory_usage{datacenter="foo2", job="bar1", instance="baz2:1234"}
 	MetricGroupID uint64
 
-	// JobID is the id of an individual job (aka service)
-	// for the given project.
+	// JobID is the id of an individual job (aka service).
 	//
 	// JobID must be unique.
 	//
@@ -38,8 +37,7 @@ type TSID struct {
 	// See https://prometheus.io/docs/concepts/jobs_instances/ for details.
 	JobID uint32
 
-	// InstanceID is the id of an instance (aka process)
-	// for the given project.
+	// InstanceID is the id of an instance (aka process).
 	//
 	// InstanceID must be unique.
 	//
@@ -88,34 +86,16 @@ func (t *TSID) Unmarshal(src []byte) ([]byte, error) {
 
 // Less return true if t < b.
 func (t *TSID) Less(b *TSID) bool {
-	if t.MetricID == b.MetricID {
-		// Fast path - two TSID values are identical.
-		return false
+	// Do not compare MetricIDs here as fast path for determining identical TSIDs,
+	// since identical TSIDs aren't passed here in hot paths.
+	if t.MetricGroupID != b.MetricGroupID {
+		return t.MetricGroupID < b.MetricGroupID
 	}
-
-	if t.MetricGroupID < b.MetricGroupID {
-		return true
+	if t.JobID != b.JobID {
+		return t.JobID < b.JobID
 	}
-	if t.MetricGroupID > b.MetricGroupID {
-		return false
+	if t.InstanceID != b.InstanceID {
+		return t.InstanceID < b.InstanceID
 	}
-	if t.JobID < b.JobID {
-		return true
-	}
-	if t.JobID > b.JobID {
-		return false
-	}
-	if t.InstanceID < b.InstanceID {
-		return true
-	}
-	if t.InstanceID > b.InstanceID {
-		return false
-	}
-	if t.MetricID < b.MetricID {
-		return true
-	}
-	if t.MetricID > b.MetricID {
-		return false
-	}
-	return false
+	return t.MetricID < b.MetricID
 }

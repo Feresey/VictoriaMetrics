@@ -3,7 +3,6 @@ package promql
 import (
 	"fmt"
 	"math"
-	"sort"
 	"strings"
 	"sync"
 
@@ -23,8 +22,8 @@ var rollupFuncs = map[string]newRollupFunc{
 	"deriv_fast":         newRollupFuncOneArg(rollupDerivFast),
 	"holt_winters":       newRollupHoltWinters,
 	"idelta":             newRollupFuncOneArg(rollupIdelta),
-	"increase":           newRollupFuncOneArg(rollupDelta),  // + rollupFuncsRemoveCounterResets
-	"irate":              newRollupFuncOneArg(rollupIderiv), // + rollupFuncsRemoveCounterResets
+	"increase":           newRollupFuncOneArg(rollupIncrease), // + rollupFuncsRemoveCounterResets
+	"irate":              newRollupFuncOneArg(rollupIderiv),   // + rollupFuncsRemoveCounterResets
 	"predict_linear":     newRollupPredictLinear,
 	"rate":               newRollupFuncOneArg(rollupDerivFast), // + rollupFuncsRemoveCounterResets
 	"resets":             newRollupFuncOneArg(rollupResets),
@@ -38,21 +37,24 @@ var rollupFuncs = map[string]newRollupFunc{
 	"stdvar_over_time":   newRollupFuncOneArg(rollupStdvar),
 
 	// Additional rollup funcs.
-	"sum2_over_time":     newRollupFuncOneArg(rollupSum2),
-	"geomean_over_time":  newRollupFuncOneArg(rollupGeomean),
-	"first_over_time":    newRollupFuncOneArg(rollupFirst),
-	"last_over_time":     newRollupFuncOneArg(rollupLast),
-	"distinct_over_time": newRollupFuncOneArg(rollupDistinct),
-	"integrate":          newRollupFuncOneArg(rollupIntegrate),
-	"ideriv":             newRollupFuncOneArg(rollupIderiv),
-	"lifetime":           newRollupFuncOneArg(rollupLifetime),
-	"scrape_interval":    newRollupFuncOneArg(rollupScrapeInterval),
-	"rollup":             newRollupFuncOneArg(rollupFake),
-	"rollup_rate":        newRollupFuncOneArg(rollupFake), // + rollupFuncsRemoveCounterResets
-	"rollup_deriv":       newRollupFuncOneArg(rollupFake),
-	"rollup_delta":       newRollupFuncOneArg(rollupFake),
-	"rollup_increase":    newRollupFuncOneArg(rollupFake), // + rollupFuncsRemoveCounterResets
-	"rollup_candlestick": newRollupFuncOneArg(rollupFake),
+	"sum2_over_time":      newRollupFuncOneArg(rollupSum2),
+	"geomean_over_time":   newRollupFuncOneArg(rollupGeomean),
+	"first_over_time":     newRollupFuncOneArg(rollupFirst),
+	"last_over_time":      newRollupFuncOneArg(rollupLast),
+	"distinct_over_time":  newRollupFuncOneArg(rollupDistinct),
+	"increases_over_time": newRollupFuncOneArg(rollupIncreases),
+	"decreases_over_time": newRollupFuncOneArg(rollupDecreases),
+	"integrate":           newRollupFuncOneArg(rollupIntegrate),
+	"ideriv":              newRollupFuncOneArg(rollupIderiv),
+	"lifetime":            newRollupFuncOneArg(rollupLifetime),
+	"lag":                 newRollupFuncOneArg(rollupLag),
+	"scrape_interval":     newRollupFuncOneArg(rollupScrapeInterval),
+	"rollup":              newRollupFuncOneArg(rollupFake),
+	"rollup_rate":         newRollupFuncOneArg(rollupFake), // + rollupFuncsRemoveCounterResets
+	"rollup_deriv":        newRollupFuncOneArg(rollupFake),
+	"rollup_delta":        newRollupFuncOneArg(rollupFake),
+	"rollup_increase":     newRollupFuncOneArg(rollupFake), // + rollupFuncsRemoveCounterResets
+	"rollup_candlestick":  newRollupFuncOneArg(rollupFake),
 }
 
 var rollupFuncsMayAdjustWindow = map[string]bool{
@@ -111,8 +113,10 @@ type rollupFuncArg struct {
 	values        []float64
 	timestamps    []int64
 
-	idx  int
-	step int64
+	currTimestamp int64
+	idx           int
+	step          int64
+	realPrevValue float64
 }
 
 func (rfa *rollupFuncArg) reset() {
@@ -120,8 +124,10 @@ func (rfa *rollupFuncArg) reset() {
 	rfa.prevTimestamp = 0
 	rfa.values = nil
 	rfa.timestamps = nil
+	rfa.currTimestamp = 0
 	rfa.idx = 0
 	rfa.step = 0
+	rfa.realPrevValue = nan
 }
 
 // rollupFunc must return rollup value for the given rfa.
@@ -147,6 +153,9 @@ type rollupConfig struct {
 	MayAdjustWindow bool
 
 	Timestamps []int64
+
+	// LoookbackDelta is the analog to `-query.lookback-delta` from Prometheus world.
+	LookbackDelta int64
 }
 
 var (
@@ -184,6 +193,9 @@ func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []i
 	dstValues = decimal.ExtendFloat64sCapacity(dstValues, len(rc.Timestamps))
 
 	maxPrevInterval := getMaxPrevInterval(timestamps)
+	if rc.LookbackDelta > 0 && maxPrevInterval > rc.LookbackDelta {
+		maxPrevInterval = rc.LookbackDelta
+	}
 	window := rc.Window
 	if window <= 0 {
 		window = rc.Step
@@ -194,6 +206,7 @@ func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []i
 	rfa := getRollupFuncArg()
 	rfa.idx = 0
 	rfa.step = rc.Step
+	rfa.realPrevValue = nan
 
 	i := 0
 	j := 0
@@ -218,6 +231,10 @@ func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []i
 
 		rfa.values = values[i:j]
 		rfa.timestamps = timestamps[i:j]
+		rfa.currTimestamp = tEnd
+		if i > 0 {
+			rfa.realPrevValue = values[i-1]
+		}
 		value := rc.Func(rfa)
 		rfa.idx++
 		dstValues = append(dstValues, value)
@@ -261,17 +278,42 @@ func seekFirstTimestampIdxAfter(timestamps []int64, seekTimestamp int64, nHint i
 		return startIdx + len(timestamps)
 	}
 	// Slow path: too big len(timestamps), so use binary search.
-	i := sort.Search(len(timestamps), func(n int) bool {
-		return n >= 0 && n < len(timestamps) && timestamps[n] > seekTimestamp
-	})
-	return startIdx + i
+	i := binarySearchInt64(timestamps, seekTimestamp+1)
+	return startIdx + int(i)
+}
+
+func binarySearchInt64(a []int64, v int64) uint {
+	// Copy-pasted sort.Search from https://golang.org/src/sort/search.go?s=2246:2286#L49
+	i, j := uint(0), uint(len(a))
+	for i < j {
+		h := (i + j) >> 1
+		if h < uint(len(a)) && a[h] < v {
+			i = h + 1
+		} else {
+			j = h
+		}
+	}
+	return i
 }
 
 func getMaxPrevInterval(timestamps []int64) int64 {
 	if len(timestamps) < 2 {
 		return int64(maxSilenceInterval)
 	}
-	d := (timestamps[len(timestamps)-1] - timestamps[0]) / int64(len(timestamps)-1)
+
+	// Estimate scrape interval as 0.6 quantile for the first 100 intervals.
+	h := histogram.GetFast()
+	tsPrev := timestamps[0]
+	timestamps = timestamps[1:]
+	if len(timestamps) > 100 {
+		timestamps = timestamps[:100]
+	}
+	for _, ts := range timestamps {
+		h.Update(float64(ts - tsPrev))
+		tsPrev = ts
+	}
+	d := int64(h.Quantile(0.6))
+	histogram.PutFast(h)
 	if d <= 0 {
 		return int64(maxSilenceInterval)
 	}
@@ -531,11 +573,14 @@ func rollupAvg(rfa *rollupFuncArg) float64 {
 func rollupMin(rfa *rollupFuncArg) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
+	minValue := rfa.prevValue
 	values := rfa.values
-	if len(values) == 0 {
-		return rfa.prevValue
+	if math.IsNaN(minValue) {
+		if len(values) == 0 {
+			return nan
+		}
+		minValue = values[0]
 	}
-	minValue := values[0]
 	for _, v := range values {
 		if v < minValue {
 			minValue = v
@@ -547,11 +592,14 @@ func rollupMin(rfa *rollupFuncArg) float64 {
 func rollupMax(rfa *rollupFuncArg) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
+	maxValue := rfa.prevValue
 	values := rfa.values
-	if len(values) == 0 {
-		return rfa.prevValue
+	if math.IsNaN(maxValue) {
+		if len(values) == 0 {
+			return nan
+		}
+		maxValue = values[0]
 	}
-	maxValue := values[0]
 	for _, v := range values {
 		if v > maxValue {
 			maxValue = v
@@ -565,7 +613,10 @@ func rollupSum(rfa *rollupFuncArg) float64 {
 	// before calling rollup funcs.
 	values := rfa.values
 	if len(values) == 0 {
-		return rfa.prevValue
+		if math.IsNaN(rfa.prevValue) {
+			return nan
+		}
+		return 0
 	}
 	var sum float64
 	for _, v := range values {
@@ -649,6 +700,14 @@ func rollupStdvar(rfa *rollupFuncArg) float64 {
 }
 
 func rollupDelta(rfa *rollupFuncArg) float64 {
+	return rollupDeltaInternal(rfa, false)
+}
+
+func rollupIncrease(rfa *rollupFuncArg) float64 {
+	return rollupDeltaInternal(rfa, true)
+}
+
+func rollupDeltaInternal(rfa *rollupFuncArg, canUseRealPrevValue bool) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
 	values := rfa.values
@@ -658,6 +717,10 @@ func rollupDelta(rfa *rollupFuncArg) float64 {
 			return nan
 		}
 		if len(values) == 1 {
+			if canUseRealPrevValue && !math.IsNaN(rfa.realPrevValue) {
+				// Fix against removeCounterResets.
+				return values[0] - rfa.realPrevValue
+			}
 			// Assume that the previous non-existing value was 0.
 			return values[0]
 		}
@@ -782,6 +845,18 @@ func rollupLifetime(rfa *rollupFuncArg) float64 {
 	return float64(timestamps[len(timestamps)-1]-rfa.prevTimestamp) * 1e-3
 }
 
+func rollupLag(rfa *rollupFuncArg) float64 {
+	// Calculate the duration between the current timestamp and the last data point.
+	timestamps := rfa.timestamps
+	if len(timestamps) == 0 {
+		if math.IsNaN(rfa.prevValue) {
+			return nan
+		}
+		return float64(rfa.currTimestamp-rfa.prevTimestamp) * 1e-3
+	}
+	return float64(rfa.currTimestamp-timestamps[len(timestamps)-1]) * 1e-3
+}
+
 func rollupScrapeInterval(rfa *rollupFuncArg) float64 {
 	// Calculate the average interval between data points.
 	timestamps := rfa.timestamps
@@ -819,6 +894,37 @@ func rollupChanges(rfa *rollupFuncArg) float64 {
 	}
 	return float64(n)
 }
+
+func rollupIncreases(rfa *rollupFuncArg) float64 {
+	// There is no need in handling NaNs here, since they must be cleaned up
+	// before calling rollup funcs.
+	values := rfa.values
+	if len(values) == 0 {
+		if math.IsNaN(rfa.prevValue) {
+			return nan
+		}
+		return 0
+	}
+	prevValue := rfa.prevValue
+	if math.IsNaN(prevValue) {
+		prevValue = values[0]
+		values = values[1:]
+	}
+	if len(values) == 0 {
+		return 0
+	}
+	n := 0
+	for _, v := range values {
+		if v > prevValue {
+			n++
+		}
+		prevValue = v
+	}
+	return float64(n)
+}
+
+// `decreases_over_time` logic is the same as `resets` logic.
+var rollupDecreases = rollupResets
 
 func rollupResets(rfa *rollupFuncArg) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
@@ -922,6 +1028,8 @@ func rollupIntegrate(rfa *rollupFuncArg) float64 {
 		timestamp := timestamps[i]
 		dt := float64(timestamp-prevTimestamp) * 1e-3
 		sum += 0.5 * (v + prevValue) * dt
+		prevTimestamp = timestamp
+		prevValue = v
 	}
 	return sum
 }

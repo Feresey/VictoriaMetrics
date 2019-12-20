@@ -71,7 +71,16 @@ func TestSearchQueryMarshalUnmarshal(t *testing.T) {
 }
 
 func TestSearch(t *testing.T) {
-	path := "TestSearch"
+	t.Run("global_inverted_index", func(t *testing.T) {
+		testSearchGeneric(t, false)
+	})
+	t.Run("perday_inverted_index", func(t *testing.T) {
+		testSearchGeneric(t, true)
+	})
+}
+
+func testSearchGeneric(t *testing.T, forcePerDayInvertedIndex bool) {
+	path := fmt.Sprintf("TestSearch_%v", forcePerDayInvertedIndex)
 	st, err := OpenStorage(path, 0)
 	if err != nil {
 		t.Fatalf("cannot open storage %q: %s", path, err)
@@ -96,7 +105,7 @@ func TestSearch(t *testing.T) {
 		{[]byte("instance"), []byte("8.8.8.8:1234")},
 	}
 	startTimestamp := timestampFromTime(time.Now())
-	startTimestamp -= startTimestamp % (1e3 * 3600 * 24)
+	startTimestamp -= startTimestamp % (1e3 * 60 * 30)
 	blockRowsCount := 0
 	for i := 0; i < rowsCount; i++ {
 		mn.MetricGroup = []byte(fmt.Sprintf("metric_%d", i%metricGroupsCount))
@@ -125,6 +134,13 @@ func TestSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cannot re-open storage %q: %s", path, err)
 	}
+	if forcePerDayInvertedIndex {
+		idb := st.idb()
+		idb.startDateForPerDayInvertedIndex = 0
+		idb.doExtDB(func(extDB *indexDB) {
+			extDB.startDateForPerDayInvertedIndex = 0
+		})
+	}
 
 	// Run search.
 	tr := TimeRange{
@@ -133,7 +149,7 @@ func TestSearch(t *testing.T) {
 	}
 
 	t.Run("serial", func(t *testing.T) {
-		if err := testSearch(st, tr, mrs, accountsCount); err != nil {
+		if err := testSearchInternal(st, tr, mrs, accountsCount); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
 	})
@@ -142,7 +158,7 @@ func TestSearch(t *testing.T) {
 		ch := make(chan error, 3)
 		for i := 0; i < cap(ch); i++ {
 			go func() {
-				ch <- testSearch(st, tr, mrs, accountsCount)
+				ch <- testSearchInternal(st, tr, mrs, accountsCount)
 			}()
 		}
 		for i := 0; i < cap(ch); i++ {
@@ -158,7 +174,7 @@ func TestSearch(t *testing.T) {
 	})
 }
 
-func testSearch(st *Storage, tr TimeRange, mrs []MetricRow, accountsCount int) error {
+func testSearchInternal(st *Storage, tr TimeRange, mrs []MetricRow, accountsCount int) error {
 	var s Search
 	for i := 0; i < 10; i++ {
 		// Prepare TagFilters for search.

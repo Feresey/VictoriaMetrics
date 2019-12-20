@@ -83,22 +83,18 @@ func (addr tmpBlockAddr) String() string {
 
 var tmpBlocksFilesCreated = metrics.NewCounter(`vm_tmp_blocks_files_created_total`)
 
-// WriteBlock writes b to tbf.
+// WriteBlockData writes b to tbf.
 //
 // It returns errors since the operation may fail on space shortage
 // and this must be handled.
-func (tbf *tmpBlocksFile) WriteBlock(b *storage.Block) (tmpBlockAddr, error) {
-	bb := tmpBufPool.Get()
-	defer tmpBufPool.Put(bb)
-	bb.B = storage.MarshalBlock(bb.B[:0], b)
-
+func (tbf *tmpBlocksFile) WriteBlockData(b []byte) (tmpBlockAddr, error) {
 	var addr tmpBlockAddr
 	addr.offset = tbf.offset
-	addr.size = len(bb.B)
+	addr.size = len(b)
 	tbf.offset += uint64(addr.size)
-	if len(tbf.buf)+len(bb.B) <= cap(tbf.buf) {
+	if len(tbf.buf)+len(b) <= cap(tbf.buf) {
 		// Fast path - the data fits tbf.buf
-		tbf.buf = append(tbf.buf, bb.B...)
+		tbf.buf = append(tbf.buf, b...)
 		return addr, nil
 	}
 
@@ -112,7 +108,7 @@ func (tbf *tmpBlocksFile) WriteBlock(b *storage.Block) (tmpBlockAddr, error) {
 		tmpBlocksFilesCreated.Inc()
 	}
 	_, err := tbf.f.Write(tbf.buf)
-	tbf.buf = append(tbf.buf[:0], bb.B...)
+	tbf.buf = append(tbf.buf[:0], b...)
 	if err != nil {
 		return addr, fmt.Errorf("cannot write block to %q: %s", tbf.f.Name(), err)
 	}
@@ -130,7 +126,10 @@ func (tbf *tmpBlocksFile) Finalize() error {
 	if _, err := tbf.f.Seek(0, 0); err != nil {
 		logger.Panicf("FATAL: cannot seek to the start of file: %s", err)
 	}
-	mustFadviseRandomRead(tbf.f)
+	// Hint the OS that the file is read almost sequentiallly.
+	// This should reduce the number of disk seeks, which is important
+	// for HDDs.
+	mustFadviseSequentialRead(tbf.f)
 	return nil
 }
 

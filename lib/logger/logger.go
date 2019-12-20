@@ -9,12 +9,17 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/buildinfo"
+	"github.com/VictoriaMetrics/metrics"
 )
 
-var loggerLevel = flag.String("loggerLevel", "INFO", "Minimum level of errors to log. Possible values: INFO, ERROR, FATAL, PANIC")
+var (
+	loggerLevel  = flag.String("loggerLevel", "INFO", "Minimum level of errors to log. Possible values: INFO, ERROR, FATAL, PANIC")
+	loggerFormat = flag.String("loggerFormat", "default", "Format for logs. Possible values: default, json")
+)
 
 // Init initializes the logger.
 //
@@ -23,7 +28,9 @@ var loggerLevel = flag.String("loggerLevel", "INFO", "Minimum level of errors to
 // There is no need in calling Init from tests.
 func Init() {
 	validateLoggerLevel()
+	validateLoggerFormat()
 	go errorsLoggedCleaner()
+	go logMessageWriter()
 	logAllFlags()
 }
 
@@ -33,6 +40,15 @@ func validateLoggerLevel() {
 	default:
 		// We cannot use logger.Panicf here, since the logger isn't initialized yet.
 		panic(fmt.Errorf("FATAL: unsupported `-loggerLevel` value: %q; supported values are: INFO, ERROR, FATAL, PANIC", *loggerLevel))
+	}
+}
+
+func validateLoggerFormat() {
+	switch *loggerFormat {
+	case "default", "json":
+	default:
+		// We cannot use logger.Pancif here, since the logger isn't initialized yet.
+		panic(fmt.Errorf("FATAL: unsupported `-loggerFormat` value: %q; supported values are: default, json", *loggerFormat))
 	}
 }
 
@@ -99,7 +115,7 @@ func (lw *logWriter) Write(p []byte) (int, error) {
 }
 
 func logMessage(level, msg string, skipframes int) {
-	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000+0000")
+	timestamp := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
 	levelLowercase := strings.ToLower(level)
 	_, file, line, ok := runtime.Caller(skipframes)
 	if !ok {
@@ -114,12 +130,27 @@ func logMessage(level, msg string, skipframes int) {
 	for len(msg) > 0 && msg[len(msg)-1] == '\n' {
 		msg = msg[:len(msg)-1]
 	}
-	logMsg := fmt.Sprintf("%s\t%s\t%s:%d\t%s\n", timestamp, levelLowercase, file, line, msg)
+	var logMsg string
+	switch *loggerFormat {
+	case "json":
+		caller := fmt.Sprintf("%s:%d", file, line)
+		logMsg = fmt.Sprintf(`{"ts":%q,"level":%q,"caller":%q,"msg":%q}`+"\n", timestamp, levelLowercase, caller, msg)
+	default:
+		logMsg = fmt.Sprintf("%s\t%s\t%s:%d\t%s\n", timestamp, levelLowercase, file, line, msg)
+	}
 
-	// Serialize writes to log.
-	mu.Lock()
-	fmt.Fprint(os.Stderr, logMsg)
-	mu.Unlock()
+	select {
+	case logMessageCh <- logMsg:
+	default:
+		// Writing to log can stuck if the log output isn't consumed in timely manner.
+		// Handle this case via `vm_log_messages_dropped_total`
+		logMessagesDropped.Inc()
+	}
+
+	// Increment vm_log_messages_total
+	location := fmt.Sprintf("%s:%d", file, line)
+	counterName := fmt.Sprintf(`vm_log_messages_total{app_version=%q, level=%q, location=%q}`, buildinfo.Version, levelLowercase, location)
+	metrics.GetOrCreateCounter(counterName).Inc()
 
 	switch level {
 	case "PANIC":
@@ -129,7 +160,15 @@ func logMessage(level, msg string, skipframes int) {
 	}
 }
 
-var mu sync.Mutex
+var logMessagesDropped = metrics.NewCounter(`vm_log_messages_dropped_total`)
+
+func logMessageWriter() {
+	for msg := range logMessageCh {
+		fmt.Fprint(os.Stderr, msg)
+	}
+}
+
+var logMessageCh = make(chan string, 100)
 
 func shouldSkipLog(level string) bool {
 	switch *loggerLevel {

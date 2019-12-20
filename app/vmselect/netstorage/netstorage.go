@@ -92,6 +92,7 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 	doneCh := make(chan error)
 
 	// Start workers.
+	rowsProcessedTotal := uint64(0)
 	for i := 0; i < workersCount; i++ {
 		go func(workerID uint) {
 			rs := getResult()
@@ -99,6 +100,7 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 			maxWorkersCount := gomaxprocs / workersCount
 
 			var err error
+			rowsProcessed := 0
 			for pts := range workCh {
 				if time.Until(rss.deadline.Deadline) < 0 {
 					err = fmt.Errorf("timeout exceeded during query execution: %s", rss.deadline.Timeout)
@@ -111,8 +113,10 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 					// Skip empty blocks.
 					continue
 				}
+				rowsProcessed += len(rs.Values)
 				f(rs, workerID)
 			}
+			atomic.AddUint64(&rowsProcessedTotal, uint64(rowsProcessed))
 			// Drain the remaining work
 			for range workCh {
 			}
@@ -124,6 +128,7 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 	for i := range rss.packedTimeseries {
 		workCh <- &rss.packedTimeseries[i]
 	}
+	seriesProcessedTotal := len(rss.packedTimeseries)
 	rss.packedTimeseries = rss.packedTimeseries[:0]
 	close(workCh)
 
@@ -134,6 +139,8 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 			errors = append(errors, err)
 		}
 	}
+	perQueryRowsProcessed.Update(float64(rowsProcessedTotal))
+	perQuerySeriesProcessed.Update(float64(seriesProcessedTotal))
 	if len(errors) > 0 {
 		// Return just the first error, since other errors
 		// is likely duplicate the first error.
@@ -141,6 +148,9 @@ func (rss *Results) RunParallel(f func(rs *Result, workerID uint)) error {
 	}
 	return nil
 }
+
+var perQueryRowsProcessed = metrics.NewHistogram(`vm_per_query_rows_processed_count`)
+var perQuerySeriesProcessed = metrics.NewHistogram(`vm_per_query_series_processed_count`)
 
 var gomaxprocs = runtime.GOMAXPROCS(-1)
 
@@ -422,13 +432,10 @@ func GetLabelEntries(deadline Deadline) ([]storage.TagEntry, error) {
 	// Sort labelEntries by the number of label values in each entry.
 	sort.Slice(labelEntries, func(i, j int) bool {
 		a, b := labelEntries[i].Values, labelEntries[j].Values
-		if len(a) < len(b) {
-			return true
+		if len(a) != len(b) {
+			return len(a) > len(b)
 		}
-		if len(a) > len(b) {
-			return false
-		}
-		return labelEntries[i].Key < labelEntries[j].Key
+		return labelEntries[i].Key > labelEntries[j].Key
 	})
 
 	return labelEntries, nil
@@ -452,15 +459,11 @@ func getStorageSearch() *storage.Search {
 }
 
 func putStorageSearch(sr *storage.Search) {
-	n := atomic.LoadUint64(&sr.MissingMetricNamesForMetricID)
-	missingMetricNamesForMetricID.Add(int(n))
 	sr.MustClose()
 	ssPool.Put(sr)
 }
 
 var ssPool sync.Pool
-
-var missingMetricNamesForMetricID = metrics.NewCounter(`vm_missing_metric_names_for_metric_id_total`)
 
 // ProcessSearchQuery performs sq on storage nodes until the given deadline.
 func ProcessSearchQuery(sq *storage.SearchQuery, fetchData bool, deadline Deadline) (*Results, error) {
@@ -484,9 +487,12 @@ func ProcessSearchQuery(sq *storage.SearchQuery, fetchData bool, deadline Deadli
 	tbf := getTmpBlocksFile()
 	m := make(map[string][]tmpBlockAddr)
 	blocksRead := 0
+	bb := tmpBufPool.Get()
+	defer tmpBufPool.Put(bb)
 	for sr.NextMetricBlock() {
 		blocksRead++
-		addr, err := tbf.WriteBlock(sr.MetricBlock.Block)
+		bb.B = storage.MarshalBlock(bb.B[:0], sr.MetricBlock.Block)
+		addr, err := tbf.WriteBlockData(bb.B)
 		if err != nil {
 			putTmpBlocksFile(tbf)
 			return nil, fmt.Errorf("cannot write data block #%d to temporary blocks file: %s", blocksRead, err)
@@ -520,6 +526,15 @@ func ProcessSearchQuery(sq *storage.SearchQuery, fetchData bool, deadline Deadli
 		pts.metricName = metricName
 		pts.addrs = addrs
 	}
+
+	// Sort rss.packedTimeseries by the first addr offset in order
+	// to reduce the number of disk seeks during unpacking in RunParallel.
+	// In this case tmpBlocksFile must be read almost sequentially.
+	sort.Slice(rss.packedTimeseries, func(i, j int) bool {
+		pts := rss.packedTimeseries
+		return pts[i].addrs[0].offset < pts[j].addrs[0].offset
+	})
+
 	return &rss, nil
 }
 

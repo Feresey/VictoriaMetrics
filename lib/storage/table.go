@@ -10,6 +10,7 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/uint64set"
 )
 
 // table represents a single table with time series data.
@@ -18,7 +19,7 @@ type table struct {
 	smallPartitionsPath string
 	bigPartitionsPath   string
 
-	getDeletedMetricIDs func() map[uint64]struct{}
+	getDeletedMetricIDs func() *uint64set.Set
 
 	ptws     []*partitionWrapper
 	ptwsLock sync.Mutex
@@ -33,11 +34,15 @@ type table struct {
 
 // partitionWrapper provides refcounting mechanism for the partition.
 type partitionWrapper struct {
-	pt       *partition
+	// Atomic counters must be at the top of struct for proper 8-byte alignment on 32-bit archs.
+	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/212
+
 	refCount uint64
 
 	// The partition must be dropped if mustDrop > 0
 	mustDrop uint64
+
+	pt *partition
 }
 
 func (ptw *partitionWrapper) incRef() {
@@ -75,7 +80,7 @@ func (ptw *partitionWrapper) scheduleToDrop() {
 // The table is created if it doesn't exist.
 //
 // Data older than the retentionMonths may be dropped at any time.
-func openTable(path string, retentionMonths int, getDeletedMetricIDs func() map[uint64]struct{}) (*table, error) {
+func openTable(path string, retentionMonths int, getDeletedMetricIDs func() *uint64set.Set) (*table, error) {
 	path = filepath.Clean(path)
 
 	// Create a directory for the table if it doesn't exist yet.
@@ -215,7 +220,7 @@ func (tb *table) flushRawRows() {
 	defer tb.PutPartitions(ptws)
 
 	for _, ptw := range ptws {
-		ptw.pt.flushRawRows(nil, true)
+		ptw.pt.flushRawRows(true)
 	}
 }
 
@@ -430,30 +435,20 @@ func (tb *table) PutPartitions(ptws []*partitionWrapper) {
 	}
 }
 
-func openPartitions(smallPartitionsPath, bigPartitionsPath string, getDeletedMetricIDs func() map[uint64]struct{}) ([]*partition, error) {
-	smallD, err := os.Open(smallPartitionsPath)
-	if err != nil {
-		return nil, fmt.Errorf("cannot open directory with small partitions %q: %s", smallPartitionsPath, err)
+func openPartitions(smallPartitionsPath, bigPartitionsPath string, getDeletedMetricIDs func() *uint64set.Set) ([]*partition, error) {
+	// Certain partition directories in either `big` or `small` dir may be missing
+	// after restoring from backup. So populate partition names from both dirs.
+	ptNames := make(map[string]bool)
+	if err := populatePartitionNames(smallPartitionsPath, ptNames); err != nil {
+		return nil, err
 	}
-	defer fs.MustClose(smallD)
-
-	fis, err := smallD.Readdir(-1)
-	if err != nil {
-		return nil, fmt.Errorf("cannot read directory with small partitions %q: %s", smallPartitionsPath, err)
+	if err := populatePartitionNames(bigPartitionsPath, ptNames); err != nil {
+		return nil, err
 	}
 	var pts []*partition
-	for _, fi := range fis {
-		if !fs.IsDirOrSymlink(fi) {
-			// Skip non-directories
-			continue
-		}
-		ptName := fi.Name()
-		if ptName == "snapshots" {
-			// Skipe directory with snapshots
-			continue
-		}
-		smallPartsPath := filepath.Join(smallPartitionsPath, ptName)
-		bigPartsPath := filepath.Join(bigPartitionsPath, ptName)
+	for ptName := range ptNames {
+		smallPartsPath := smallPartitionsPath + "/" + ptName
+		bigPartsPath := bigPartitionsPath + "/" + ptName
 		pt, err := openPartition(smallPartsPath, bigPartsPath, getDeletedMetricIDs)
 		if err != nil {
 			mustClosePartitions(pts)
@@ -462,6 +457,32 @@ func openPartitions(smallPartitionsPath, bigPartitionsPath string, getDeletedMet
 		pts = append(pts, pt)
 	}
 	return pts, nil
+}
+
+func populatePartitionNames(partitionsPath string, ptNames map[string]bool) error {
+	d, err := os.Open(partitionsPath)
+	if err != nil {
+		return fmt.Errorf("cannot open directory with partitions %q: %s", partitionsPath, err)
+	}
+	defer fs.MustClose(d)
+
+	fis, err := d.Readdir(-1)
+	if err != nil {
+		return fmt.Errorf("cannot read directory with partitions %q: %s", partitionsPath, err)
+	}
+	for _, fi := range fis {
+		if !fs.IsDirOrSymlink(fi) {
+			// Skip non-directories
+			continue
+		}
+		ptName := fi.Name()
+		if ptName == "snapshots" {
+			// Skip directory with snapshots
+			continue
+		}
+		ptNames[ptName] = true
+	}
+	return nil
 }
 
 func mustClosePartitions(pts []*partition) {

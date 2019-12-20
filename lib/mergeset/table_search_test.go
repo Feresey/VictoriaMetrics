@@ -40,7 +40,7 @@ func TestTableSearchSerial(t *testing.T) {
 
 	func() {
 		// Re-open the table and verify the search works.
-		tb, err := OpenTable(path, nil)
+		tb, err := OpenTable(path, nil, nil)
 		if err != nil {
 			t.Fatalf("cannot open table: %s", err)
 		}
@@ -75,7 +75,7 @@ func TestTableSearchConcurrent(t *testing.T) {
 
 	// Re-open the table and verify the search works.
 	func() {
-		tb, err := OpenTable(path, nil)
+		tb, err := OpenTable(path, nil, nil)
 		if err != nil {
 			t.Fatalf("cannot open table: %s", err)
 		}
@@ -109,7 +109,7 @@ func testTableSearchConcurrent(tb *Table, items []string) error {
 
 func testTableSearchSerial(tb *Table, items []string) error {
 	var ts TableSearch
-	ts.Init(tb)
+	ts.Init(tb, nil)
 	for _, key := range []string{
 		"",
 		"123",
@@ -151,7 +151,7 @@ func newTestTable(path string, itemsCount int) (*Table, []string, error) {
 	flushCallback := func() {
 		atomic.AddUint64(&flushes, 1)
 	}
-	tb, err := OpenTable(path, flushCallback)
+	tb, err := OpenTable(path, flushCallback, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot open table: %s", err)
 	}

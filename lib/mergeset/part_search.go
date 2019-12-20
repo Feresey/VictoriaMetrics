@@ -13,7 +13,7 @@ import (
 type partSearch struct {
 	// Item contains the last item found after the call to NextItem.
 	//
-	// The Item content is valud intil the next call to NextItem.
+	// The Item content is valid until the next call to NextItem.
 	Item []byte
 
 	// p is a part to search.
@@ -30,6 +30,8 @@ type partSearch struct {
 
 	// Pointer to inmemory block, which may be reused.
 	inmemoryBlockReuse *inmemoryBlock
+
+	shouldCacheBlock func(item []byte) bool
 
 	idxbCache *indexBlockCache
 	ibCache   *inmemoryBlockCache
@@ -59,6 +61,7 @@ func (ps *partSearch) reset() {
 		putInmemoryBlock(ps.inmemoryBlockReuse)
 		ps.inmemoryBlockReuse = nil
 	}
+	ps.shouldCacheBlock = nil
 	ps.idxbCache = nil
 	ps.ibCache = nil
 	ps.err = nil
@@ -75,7 +78,7 @@ func (ps *partSearch) reset() {
 // Init initializes ps for search in the p.
 //
 // Use Seek for search in p.
-func (ps *partSearch) Init(p *part) {
+func (ps *partSearch) Init(p *part, shouldCacheBlock func(item []byte) bool) {
 	ps.reset()
 
 	ps.p = p
@@ -324,6 +327,16 @@ func (ps *partSearch) readIndexBlock(mr *metaindexRow) (*indexBlock, error) {
 }
 
 func (ps *partSearch) getInmemoryBlock(bh *blockHeader) (*inmemoryBlock, bool, error) {
+	if ps.shouldCacheBlock != nil {
+		if !ps.shouldCacheBlock(bh.firstItem) {
+			ib, err := ps.readInmemoryBlock(bh)
+			if err != nil {
+				return nil, false, err
+			}
+			return ib, true, nil
+		}
+	}
+
 	var ibKey inmemoryBlockCacheKey
 	ibKey.Init(bh)
 	ib := ps.ibCache.Get(ibKey)
@@ -371,7 +384,7 @@ func binarySearchKey(items [][]byte, key []byte) int {
 	i, j := uint(0), n
 	for i < j {
 		h := uint(i+j) >> 1
-		if string(key) > string(items[h]) {
+		if h >= 0 && h < uint(len(items)) && string(key) > string(items[h]) {
 			i = h + 1
 		} else {
 			j = h

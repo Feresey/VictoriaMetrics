@@ -19,14 +19,14 @@ type TagFilters struct {
 	tfs []tagFilter
 
 	// Common prefix for all the tag filters.
-	// Contains encoded nsPrefixTagToMetricID.
+	// Contains encoded nsPrefixTagToMetricIDs.
 	commonPrefix []byte
 }
 
 // NewTagFilters returns new TagFilters.
 func NewTagFilters() *TagFilters {
 	return &TagFilters{
-		commonPrefix: marshalCommonPrefix(nil, nsPrefixTagToMetricID),
+		commonPrefix: marshalCommonPrefix(nil, nsPrefixTagToMetricIDs),
 	}
 }
 
@@ -68,17 +68,22 @@ func (tfs *TagFilters) Add(key, value []byte, isNegative, isRegexp bool) error {
 
 // String returns human-readable value for tfs.
 func (tfs *TagFilters) String() string {
-	var bb bytes.Buffer
-	for i := range tfs.tfs {
-		fmt.Fprintf(&bb, ", %s", tfs.tfs[i].String())
+	if len(tfs.tfs) == 0 {
+		return "{}"
 	}
+	var bb bytes.Buffer
+	fmt.Fprintf(&bb, "{%s", tfs.tfs[0].String())
+	for i := range tfs.tfs[1:] {
+		fmt.Fprintf(&bb, ", %s", tfs.tfs[i+1].String())
+	}
+	fmt.Fprintf(&bb, "}")
 	return bb.String()
 }
 
 // Reset resets the tf
 func (tfs *TagFilters) Reset() {
 	tfs.tfs = tfs.tfs[:0]
-	tfs.commonPrefix = marshalCommonPrefix(tfs.commonPrefix[:0], nsPrefixTagToMetricID)
+	tfs.commonPrefix = marshalCommonPrefix(tfs.commonPrefix[:0], nsPrefixTagToMetricIDs)
 }
 
 func (tfs *TagFilters) marshal(dst []byte) []byte {
@@ -95,7 +100,7 @@ type tagFilter struct {
 	isNegative bool
 	isRegexp   bool
 
-	// Prefix always contains {nsPrefixTagToMetricID, key}.
+	// Prefix always contains {nsPrefixTagToMetricIDs, key}.
 	// Additionally it contains:
 	//  - value ending with tagSeparatorChar if !isRegexp.
 	//  - non-regexp prefix if isRegexp.
@@ -110,11 +115,20 @@ type tagFilter struct {
 
 // String returns human-readable tf value.
 func (tf *tagFilter) String() string {
-	var bb bytes.Buffer
-	fmt.Fprintf(&bb, "[isNegative=%v, isRegexp=%v, prefix=%q", tf.isNegative, tf.isRegexp, tf.prefix)
-	fmt.Fprintf(&bb, ", orSuffixes=%v, reSuffixMatch=%p", tf.orSuffixes, tf.reSuffixMatch)
-	fmt.Fprintf(&bb, "]")
-	return bb.String()
+	op := "="
+	if tf.isNegative {
+		op = "!="
+		if tf.isRegexp {
+			op = "!~"
+		}
+	} else if tf.isRegexp {
+		op = "=~"
+	}
+	key := tf.key
+	if len(key) == 0 {
+		key = []byte("__name__")
+	}
+	return fmt.Sprintf("%s%s%q", key, op, tf.value)
 }
 
 // Marshal appends marshaled tf to dst
@@ -317,6 +331,9 @@ func getSingleValueFuncExt(re *syntax.Regexp) func(b []byte) bool {
 	case syntax.OpCapture:
 		return getSingleValueFuncExt(re.Sub[0])
 	case syntax.OpLiteral:
+		if !isLiteral(re) {
+			return nil
+		}
 		s := string(re.Rune)
 		return func(b []byte) bool {
 			return string(b) == s
@@ -399,7 +416,7 @@ func isLiteral(re *syntax.Regexp) bool {
 	if re.Op == syntax.OpCapture {
 		return isLiteral(re.Sub[0])
 	}
-	return re.Op == syntax.OpLiteral
+	return re.Op == syntax.OpLiteral && re.Flags&syntax.FoldCase == 0
 }
 
 func getOrValues(expr string) []string {
@@ -420,6 +437,9 @@ func getOrValuesExt(re *syntax.Regexp) []string {
 	case syntax.OpCapture:
 		return getOrValuesExt(re.Sub[0])
 	case syntax.OpLiteral:
+		if !isLiteral(re) {
+			return nil
+		}
 		return []string{string(re.Rune)}
 	case syntax.OpEmptyMatch:
 		return []string{""}
@@ -592,13 +612,13 @@ func extractRegexpPrefix(b []byte) ([]byte, []byte) {
 	if re == emptyRegexp {
 		return nil, nil
 	}
-	if re.Op == syntax.OpLiteral && re.Flags&syntax.FoldCase == 0 {
+	if isLiteral(re) {
 		return []byte(string(re.Rune)), nil
 	}
 	var prefix []byte
 	if re.Op == syntax.OpConcat {
 		sub0 := re.Sub[0]
-		if sub0.Op == syntax.OpLiteral && sub0.Flags&syntax.FoldCase == 0 {
+		if isLiteral(sub0) {
 			prefix = []byte(string(sub0.Rune))
 			re.Sub = re.Sub[1:]
 			if len(re.Sub) == 0 {

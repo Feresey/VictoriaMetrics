@@ -12,8 +12,384 @@ import (
 	"time"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/encoding"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/uint64set"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/workingsetcache"
 )
+
+func TestMergeTagToMetricIDsRows(t *testing.T) {
+	f := func(items []string, expectedItems []string) {
+		t.Helper()
+		var data []byte
+		var itemsB [][]byte
+		for _, item := range items {
+			data = append(data, item...)
+			itemsB = append(itemsB, data[len(data)-len(item):])
+		}
+		if !checkItemsSorted(itemsB) {
+			t.Fatalf("source items aren't sorted; items:\n%q", itemsB)
+		}
+		resultData, resultItemsB := mergeTagToMetricIDsRows(data, itemsB)
+		if len(resultItemsB) != len(expectedItems) {
+			t.Fatalf("unexpected len(resultItemsB); got %d; want %d", len(resultItemsB), len(expectedItems))
+		}
+		if !checkItemsSorted(resultItemsB) {
+			t.Fatalf("result items aren't sorted; items:\n%q", resultItemsB)
+		}
+		for i, item := range resultItemsB {
+			if !bytes.HasPrefix(resultData, item) {
+				t.Fatalf("unexpected prefix for resultData #%d;\ngot\n%X\nwant\n%X", i, resultData, item)
+			}
+			resultData = resultData[len(item):]
+		}
+		if len(resultData) != 0 {
+			t.Fatalf("unexpected tail left in resultData: %X", resultData)
+		}
+		var resultItems []string
+		for _, item := range resultItemsB {
+			resultItems = append(resultItems, string(item))
+		}
+		if !reflect.DeepEqual(expectedItems, resultItems) {
+			t.Fatalf("unexpected items;\ngot\n%X\nwant\n%X", resultItems, expectedItems)
+		}
+	}
+	xy := func(nsPrefix byte, key, value string, metricIDs []uint64) string {
+		dst := marshalCommonPrefix(nil, nsPrefix)
+		if nsPrefix == nsPrefixDateTagToMetricIDs {
+			dst = encoding.MarshalUint64(dst, 1234567901233)
+		}
+		t := &Tag{
+			Key:   []byte(key),
+			Value: []byte(value),
+		}
+		dst = t.Marshal(dst)
+		for _, metricID := range metricIDs {
+			dst = encoding.MarshalUint64(dst, metricID)
+		}
+		return string(dst)
+	}
+	x := func(key, value string, metricIDs []uint64) string {
+		return xy(nsPrefixTagToMetricIDs, key, value, metricIDs)
+	}
+	y := func(key, value string, metricIDs []uint64) string {
+		return xy(nsPrefixDateTagToMetricIDs, key, value, metricIDs)
+	}
+
+	f(nil, nil)
+	f([]string{}, nil)
+	f([]string{"foo"}, []string{"foo"})
+	f([]string{"a", "b", "c", "def"}, []string{"a", "b", "c", "def"})
+	f([]string{"\x00", "\x00b", "\x00c", "\x00def"}, []string{"\x00", "\x00b", "\x00c", "\x00def"})
+	f([]string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+	}, []string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+	})
+	f([]string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+	}, []string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+	})
+	f([]string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		"xyz",
+	}, []string{
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		"xyz",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+	})
+	f([]string{
+		"\x00asdf",
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+	}, []string{
+		"\x00asdf",
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		"xyz",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		"xyz",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		x("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		"xyz",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{0}),
+		y("", "", []uint64{0}),
+		"xyz",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("", "", []uint64{2}),
+		x("", "", []uint64{3}),
+		x("", "", []uint64{4}),
+		"xyz",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{1, 2, 3, 4}),
+		"xyz",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("", "", []uint64{2}),
+		x("", "", []uint64{3}),
+		x("", "", []uint64{4}),
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{1, 2, 3}),
+		x("", "", []uint64{4}),
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("", "", []uint64{2, 3, 4}),
+		x("", "", []uint64{2, 3, 4, 5}),
+		x("", "", []uint64{3, 5}),
+		"foo",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{1, 2, 3, 4, 5}),
+		"foo",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("", "a", []uint64{2, 3, 4}),
+		x("", "a", []uint64{2, 3, 4, 5}),
+		x("", "b", []uint64{3, 5}),
+		"foo",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("", "a", []uint64{2, 3, 4, 5}),
+		x("", "b", []uint64{3, 5}),
+		"foo",
+	})
+	f([]string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("x", "a", []uint64{2, 3, 4}),
+		x("y", "", []uint64{2, 3, 4, 5}),
+		x("y", "x", []uint64{3, 5}),
+		"foo",
+	}, []string{
+		"\x00asdf",
+		x("", "", []uint64{1}),
+		x("x", "a", []uint64{2, 3, 4}),
+		x("y", "", []uint64{2, 3, 4, 5}),
+		x("y", "x", []uint64{3, 5}),
+		"foo",
+	})
+	f([]string{
+		"\x00asdf",
+		x("sdf", "aa", []uint64{1, 1, 3}),
+		x("sdf", "aa", []uint64{1, 2}),
+		"foo",
+	}, []string{
+		"\x00asdf",
+		x("sdf", "aa", []uint64{1, 2, 3}),
+		"foo",
+	})
+	f([]string{
+		"\x00asdf",
+		x("sdf", "aa", []uint64{1, 2, 2, 4}),
+		x("sdf", "aa", []uint64{1, 2, 3}),
+		"foo",
+	}, []string{
+		"\x00asdf",
+		x("sdf", "aa", []uint64{1, 2, 3, 4}),
+		"foo",
+	})
+
+	// Construct big source chunks
+	var metricIDs []uint64
+
+	metricIDs = metricIDs[:0]
+	for i := 0; i < maxMetricIDsPerRow-1; i++ {
+		metricIDs = append(metricIDs, uint64(i))
+	}
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		y("foo", "bar", metricIDs),
+		y("foo", "bar", metricIDs),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		y("foo", "bar", metricIDs),
+		"x",
+	})
+
+	metricIDs = metricIDs[:0]
+	for i := 0; i < maxMetricIDsPerRow; i++ {
+		metricIDs = append(metricIDs, uint64(i))
+	}
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	})
+
+	metricIDs = metricIDs[:0]
+	for i := 0; i < 3*maxMetricIDsPerRow; i++ {
+		metricIDs = append(metricIDs, uint64(i))
+	}
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	})
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", []uint64{0, 0, 1, 2, 3}),
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", []uint64{0, 1, 2, 3}),
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		"x",
+	})
+
+	// Check for duplicate metricIDs removal
+	metricIDs = metricIDs[:0]
+	for i := 0; i < maxMetricIDsPerRow-1; i++ {
+		metricIDs = append(metricIDs, 123)
+	}
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", metricIDs),
+		y("foo", "bar", metricIDs),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", []uint64{123}),
+		y("foo", "bar", []uint64{123}),
+		"x",
+	})
+
+	// Check fallback to the original items after merging, which result in incorrect ordering.
+	metricIDs = metricIDs[:0]
+	for i := 0; i < maxMetricIDsPerRow-3; i++ {
+		metricIDs = append(metricIDs, uint64(123))
+	}
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+		"x",
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+		"x",
+	})
+	f([]string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+		y("foo", "bar", []uint64{123, 124}),
+	}, []string{
+		"\x00aa",
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+		y("foo", "bar", []uint64{123, 124}),
+	})
+	f([]string{
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+	}, []string{
+		x("foo", "bar", metricIDs),
+		x("foo", "bar", []uint64{123, 123, 125}),
+		x("foo", "bar", []uint64{123, 124}),
+	})
+}
+
+func TestRemoveDuplicateMetricIDs(t *testing.T) {
+	f := func(metricIDs, expectedMetricIDs []uint64) {
+		t.Helper()
+		a := removeDuplicateMetricIDs(metricIDs)
+		if !reflect.DeepEqual(a, expectedMetricIDs) {
+			t.Fatalf("unexpected result from removeDuplicateMetricIDs:\ngot\n%d\nwant\n%d", a, expectedMetricIDs)
+		}
+	}
+	f(nil, nil)
+	f([]uint64{123}, []uint64{123})
+	f([]uint64{123, 123}, []uint64{123})
+	f([]uint64{123, 123, 123}, []uint64{123})
+	f([]uint64{123, 1234, 1235}, []uint64{123, 1234, 1235})
+	f([]uint64{0, 1, 1, 2}, []uint64{0, 1, 2})
+	f([]uint64{0, 0, 0, 1, 1, 2}, []uint64{0, 1, 2})
+	f([]uint64{0, 1, 1, 2, 2}, []uint64{0, 1, 2})
+	f([]uint64{0, 1, 2, 2}, []uint64{0, 1, 2})
+}
 
 func TestMarshalUnmarshalTSIDs(t *testing.T) {
 	f := func(tsids []TSID) {
@@ -80,8 +456,6 @@ func TestIndexDBOpenClose(t *testing.T) {
 }
 
 func TestIndexDB(t *testing.T) {
-	const accountsCount = 3
-	const projectsCount = 2
 	const metricGroups = 10
 
 	t.Run("serial", func(t *testing.T) {
@@ -110,7 +484,7 @@ func TestIndexDB(t *testing.T) {
 		if err := testIndexDBBigMetricName(db); err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
-		mns, tsids, err := testIndexDBGetOrCreateTSIDByName(db, accountsCount, projectsCount, metricGroups)
+		mns, tsids, err := testIndexDBGetOrCreateTSIDByName(db, metricGroups)
 		if err != nil {
 			t.Fatalf("unexpected error: %s", err)
 		}
@@ -171,7 +545,7 @@ func TestIndexDB(t *testing.T) {
 					ch <- err
 					return
 				}
-				mns, tsid, err := testIndexDBGetOrCreateTSIDByName(db, accountsCount, projectsCount, metricGroups)
+				mns, tsid, err := testIndexDBGetOrCreateTSIDByName(db, metricGroups)
 				if err != nil {
 					ch <- err
 					return
@@ -272,7 +646,7 @@ func testIndexDBBigMetricName(db *indexDB) error {
 	return nil
 }
 
-func testIndexDBGetOrCreateTSIDByName(db *indexDB, accountsCount, projectsCount, metricGroups int) ([]MetricName, []TSID, error) {
+func testIndexDBGetOrCreateTSIDByName(db *indexDB, metricGroups int) ([]MetricName, []TSID, error) {
 	// Create tsids.
 	var mns []MetricName
 	var tsids []TSID
@@ -280,6 +654,7 @@ func testIndexDBGetOrCreateTSIDByName(db *indexDB, accountsCount, projectsCount,
 	is := db.getIndexSearch()
 	defer db.putIndexSearch(is)
 
+	var metricNameBuf []byte
 	for i := 0; i < 4e2+1; i++ {
 		var mn MetricName
 
@@ -294,11 +669,11 @@ func testIndexDBGetOrCreateTSIDByName(db *indexDB, accountsCount, projectsCount,
 			mn.AddTag(key, value)
 		}
 		mn.sortTags()
-		metricName := mn.Marshal(nil)
+		metricNameBuf = mn.Marshal(metricNameBuf[:0])
 
 		// Create tsid for the metricName.
 		var tsid TSID
-		if err := is.GetOrCreateTSIDByName(&tsid, metricName); err != nil {
+		if err := is.GetOrCreateTSIDByName(&tsid, metricNameBuf); err != nil {
 			return nil, nil, fmt.Errorf("unexpected error when creating tsid for mn:\n%s: %s", &mn, err)
 		}
 
@@ -306,22 +681,22 @@ func testIndexDBGetOrCreateTSIDByName(db *indexDB, accountsCount, projectsCount,
 		tsids = append(tsids, tsid)
 	}
 
+	// fill Date -> MetricID cache
+	date := uint64(timestampFromTime(time.Now())) / msecPerDay
+	for i := range tsids {
+		tsid := &tsids[i]
+		if err := db.storeDateMetricID(date, tsid.MetricID); err != nil {
+			return nil, nil, fmt.Errorf("error in storeDateMetricID(%d, %d): %s", date, tsid.MetricID, err)
+		}
+	}
+
+	// Flush index to disk, so it becomes visible for search
 	db.tb.DebugFlush()
 
 	return mns, tsids, nil
 }
 
 func testIndexDBCheckTSIDByName(db *indexDB, mns []MetricName, tsids []TSID, isConcurrent bool) error {
-	// fill Date -> MetricID cache
-	date := uint64(timestampFromTime(time.Now())) / msecPerDay
-	for i := range tsids {
-		tsid := &tsids[i]
-		if err := db.storeDateMetricID(date, tsid.MetricID); err != nil {
-			return fmt.Errorf("error in storeDateMetricID(%d, %d): %s", date, tsid.MetricID, err)
-		}
-	}
-	db.tb.DebugFlush()
-
 	hasValue := func(tvs []string, v []byte) bool {
 		for _, tv := range tvs {
 			if string(v) == tv {
@@ -361,7 +736,7 @@ func testIndexDBCheckTSIDByName(db *indexDB, mns []MetricName, tsids []TSID, isC
 		var err error
 		metricNameCopy, err = db.searchMetricName(metricNameCopy[:0], tsidCopy.MetricID)
 		if err != nil {
-			return fmt.Errorf("error in searchMetricName: %s", err)
+			return fmt.Errorf("error in searchMetricName for metricID=%d; i=%d: %s", tsidCopy.MetricID, i, err)
 		}
 		if !bytes.Equal(metricName, metricNameCopy) {
 			return fmt.Errorf("unexpected mn for metricID=%d;\ngot\n%q\nwant\n%q", tsidCopy.MetricID, metricNameCopy, metricName)
@@ -451,7 +826,7 @@ func testIndexDBCheckTSIDByName(db *indexDB, mns []MetricName, tsids []TSID, isC
 			return fmt.Errorf("cannot search by exact tag filter: %s", err)
 		}
 		if !testHasTSID(tsidsFound, tsid) {
-			return fmt.Errorf("tsids is missing in exact tsidsFound\ntsid=%+v\ntsidsFound=%+v\ntfs=%s\nmn=%s", tsid, tsidsFound, tfs, mn)
+			return fmt.Errorf("tsids is missing in exact tsidsFound\ntsid=%+v\ntsidsFound=%+v\ntfs=%s\nmn=%s\ni=%d", tsid, tsidsFound, tfs, mn, i)
 		}
 
 		// Verify tag cache.
@@ -951,6 +1326,148 @@ func TestMatchTagFilters(t *testing.T) {
 	}
 	if ok {
 		t.Fatalf("Shouldn't match")
+	}
+}
+
+func TestSearchTSIDWithTimeRange(t *testing.T) {
+	metricIDCache := workingsetcache.New(1234, time.Hour)
+	metricNameCache := workingsetcache.New(1234, time.Hour)
+	defer metricIDCache.Stop()
+	defer metricNameCache.Stop()
+
+	currMetricIDs := &hourMetricIDs{
+		isFull: true,
+		m:      &uint64set.Set{},
+	}
+
+	var hmCurr atomic.Value
+	hmCurr.Store(currMetricIDs)
+
+	prevMetricIDs := &hourMetricIDs{
+		isFull: true,
+		m:      &uint64set.Set{},
+	}
+	var hmPrev atomic.Value
+	hmPrev.Store(prevMetricIDs)
+
+	dbName := "test-index-db-ts-range"
+	db, err := openIndexDB(dbName, metricIDCache, metricNameCache, &hmCurr, &hmPrev)
+	if err != nil {
+		t.Fatalf("cannot open indexDB: %s", err)
+	}
+	defer func() {
+		db.MustClose()
+		if err := os.RemoveAll(dbName); err != nil {
+			t.Fatalf("cannot remove indexDB: %s", err)
+		}
+	}()
+
+	is := db.getIndexSearch()
+	defer db.putIndexSearch(is)
+
+	// Create a bunch of per-day time series
+	const days = 5
+	const metricsPerDay = 1000
+	theDay := time.Date(2019, time.October, 15, 5, 1, 0, 0, time.UTC)
+	now := uint64(timestampFromTime(theDay))
+	currMetricIDs.hour = now / msecPerHour
+	prevMetricIDs.hour = (now - msecPerHour) / msecPerHour
+	baseDate := now / msecPerDay
+	var metricNameBuf []byte
+	for day := 0; day < days; day++ {
+		var tsids []TSID
+		for metric := 0; metric < metricsPerDay; metric++ {
+			var mn MetricName
+			mn.MetricGroup = []byte("testMetric")
+			mn.AddTag(
+				"constant",
+				"const",
+			)
+			mn.AddTag(
+				"day",
+				fmt.Sprintf("%v", day),
+			)
+			mn.AddTag(
+				"uniqueid",
+				fmt.Sprintf("%v", metric),
+			)
+			mn.sortTags()
+
+			metricNameBuf = mn.Marshal(metricNameBuf[:0])
+			var tsid TSID
+			if err := is.GetOrCreateTSIDByName(&tsid, metricNameBuf); err != nil {
+				t.Fatalf("unexpected error when creating tsid for mn:\n%s: %s", &mn, err)
+			}
+			tsids = append(tsids, tsid)
+		}
+
+		// Add the metrics to the per-day stores
+		date := baseDate - uint64(day*msecPerDay)
+		for i := range tsids {
+			tsid := &tsids[i]
+			if err := db.storeDateMetricID(date, tsid.MetricID); err != nil {
+				t.Fatalf("error in storeDateMetricID(%d, %d): %s", date, tsid.MetricID, err)
+			}
+		}
+
+		// Add the the hour metrics caches
+		if day == 0 {
+			for i := 0; i < 256; i++ {
+				prevMetricIDs.m.Add(tsids[i].MetricID)
+				currMetricIDs.m.Add(tsids[i].MetricID)
+			}
+		}
+	}
+
+	// Flush index to disk, so it becomes visible for search
+	db.tb.DebugFlush()
+
+	// Create a filter that will match series that occur across multiple days
+	tfs := NewTagFilters()
+	if err := tfs.Add([]byte("constant"), []byte("const"), false, false); err != nil {
+		t.Fatalf("cannot add filter: %s", err)
+	}
+
+	// Perform a search that can be fulfilled out of the hour metrics cache.
+	// This should return the metrics in the hourly cache
+	tr := TimeRange{
+		MinTimestamp: int64(now - msecPerHour + 1),
+		MaxTimestamp: int64(now),
+	}
+	matchedTSIDs, err := db.searchTSIDs([]*TagFilters{tfs}, tr, 10000)
+	if err != nil {
+		t.Fatalf("error searching tsids: %v", err)
+	}
+	if len(matchedTSIDs) != 256 {
+		t.Fatal("Expected time series for current hour, got", len(matchedTSIDs))
+	}
+
+	// Perform a search within a day that falls out out of the hour metrics cache.
+	// This should return the metrics for the day
+	tr = TimeRange{
+		MinTimestamp: int64(now - 2*msecPerHour - 1),
+		MaxTimestamp: int64(now),
+	}
+	matchedTSIDs, err = db.searchTSIDs([]*TagFilters{tfs}, tr, 10000)
+	if err != nil {
+		t.Fatalf("error searching tsids: %v", err)
+	}
+	if len(matchedTSIDs) != metricsPerDay {
+		t.Fatal("Expected time series for current day, got", len(matchedTSIDs))
+	}
+
+	// Perform a search across all the days, should match all metrics
+	tr = TimeRange{
+		MinTimestamp: int64(now - msecPerDay*days),
+		MaxTimestamp: int64(now),
+	}
+
+	matchedTSIDs, err = db.searchTSIDs([]*TagFilters{tfs}, tr, 10000)
+	if err != nil {
+		t.Fatalf("error searching tsids: %v", err)
+	}
+	if len(matchedTSIDs) != metricsPerDay*days {
+		t.Fatal("Expected time series for all days, got", len(matchedTSIDs))
 	}
 }
 

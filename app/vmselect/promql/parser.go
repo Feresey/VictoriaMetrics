@@ -116,13 +116,17 @@ func removeParensExpr(e expr) expr {
 		return fe
 	}
 	if pe, ok := e.(*parensExpr); ok {
+		args := *pe
+		for i, arg := range args {
+			args[i] = removeParensExpr(arg)
+		}
 		if len(*pe) == 1 {
-			return removeParensExpr((*pe)[0])
+			return args[0]
 		}
 		// Treat parensExpr as a function with empty name, i.e. union()
 		fe := &funcExpr{
 			Name: "",
-			Args: *pe,
+			Args: args,
 		}
 		return fe
 	}
@@ -1169,7 +1173,7 @@ func (p *parser) parseWindowAndStep() (string, string, bool, error) {
 	}
 	var window string
 	if !strings.HasPrefix(p.lex.Token, ":") {
-		window, err = p.parseDuration()
+		window, err = p.parsePositiveDuration()
 		if err != nil {
 			return "", "", false, err
 		}
@@ -1188,7 +1192,7 @@ func (p *parser) parseWindowAndStep() (string, string, bool, error) {
 			}
 		}
 		if p.lex.Token != "]" {
-			step, err = p.parseDuration()
+			step, err = p.parsePositiveDuration()
 			if err != nil {
 				return "", "", false, err
 			}
@@ -1218,12 +1222,33 @@ func (p *parser) parseOffset() (string, error) {
 }
 
 func (p *parser) parseDuration() (string, error) {
-	if !isDuration(p.lex.Token) {
+	isNegative := false
+	if p.lex.Token == "-" {
+		isNegative = true
+		if err := p.lex.Next(); err != nil {
+			return "", err
+		}
+	}
+	if !isPositiveDuration(p.lex.Token) {
 		return "", fmt.Errorf(`duration: unexpected token %q; want "duration"`, p.lex.Token)
 	}
 	d := p.lex.Token
 	if err := p.lex.Next(); err != nil {
 		return "", err
+	}
+	if isNegative {
+		d = "-" + d
+	}
+	return d, nil
+}
+
+func (p *parser) parsePositiveDuration() (string, error) {
+	d, err := p.parseDuration()
+	if err != nil {
+		return "", err
+	}
+	if strings.HasPrefix(d, "-") {
+		return "", fmt.Errorf("positiveDuration: expecting positive duration; got %q", d)
 	}
 	return d, nil
 }
@@ -1263,6 +1288,22 @@ func (p *parser) parseIdentExpr() (expr, error) {
 	default:
 		return nil, fmt.Errorf(`identExpr: unexpected token %q; want "(", "{", "[", ")", ","`, p.lex.Token)
 	}
+}
+
+// IsRollup verifies whether s is a rollup with non-empty window.
+//
+// It returns the wrapped query with the corresponding window, step and offset.
+func IsRollup(s string) (childQuery string, window, step, offset string) {
+	expr, err := parsePromQLWithCache(s)
+	if err != nil {
+		return
+	}
+	re, ok := expr.(*rollupExpr)
+	if !ok || len(re.Window) == 0 {
+		return
+	}
+	wrappedQuery := re.Expr.AppendString(nil)
+	return string(wrappedQuery), re.Window, re.Step, re.Offset
 }
 
 // IsMetricSelectorWithRollup verifies whether s contains PromQL metric selector

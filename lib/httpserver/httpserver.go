@@ -23,12 +23,12 @@ import (
 )
 
 var (
-	tlsEnable   = flag.Bool("tls", false, "Whether to enable TLS (aka HTTPS) for incoming requests. tlsCertFile and tlsKeyFile must be set if tls=true")
-	tlsCertFile = flag.String("tlsCertFile", "", "Path to file with TLS certificate. Used only if tls=true. Prefer ECDSA certs instead of RSA certs, since RSA certs are slow")
-	tlsKeyFile  = flag.String("tlsKeyFile", "", "Path to file with TLS key. Used only if tls=true")
+	tlsEnable   = flag.Bool("tls", false, "Whether to enable TLS (aka HTTPS) for incoming requests. `-tlsCertFile` and `-tlsKeyFile` must be set if `-tls` is set")
+	tlsCertFile = flag.String("tlsCertFile", "", "Path to file with TLS certificate. Used only if `-tls` is set. Prefer ECDSA certs instead of RSA certs, since RSA certs are slow")
+	tlsKeyFile  = flag.String("tlsKeyFile", "", "Path to file with TLS key. Used only if `-tls` is set")
 
 	httpAuthUsername = flag.String("httpAuth.username", "", "Username for HTTP Basic Auth. The authentication is disabled if empty. See also -httpAuth.password")
-	httpAuthPassword = flag.String("httpAuth.password", "", "Password for HTTP Basic Auth. The authentication is disabled -httpAuth.username is empty")
+	httpAuthPassword = flag.String("httpAuth.password", "", "Password for HTTP Basic Auth. The authentication is disabled if -httpAuth.username is empty")
 	metricsAuthKey   = flag.String("metricsAuthKey", "", "Auth key for /metrics. It overrides httpAuth settings")
 	pprofAuthKey     = flag.String("pprofAuthKey", "", "Auth key for /debug/pprof. It overrides httpAuth settings")
 
@@ -151,37 +151,54 @@ func gzipHandler(rh RequestHandler) http.HandlerFunc {
 	return http.HandlerFunc(hf)
 }
 
-var metricsHandlerDuration = metrics.NewSummary(`vm_http_request_duration_seconds{path="/metrics"}`)
+var metricsHandlerDuration = metrics.NewHistogram(`vm_http_request_duration_seconds{path="/metrics"}`)
 
 func handlerWrapper(w http.ResponseWriter, r *http.Request, rh RequestHandler) {
 	requestsTotal.Inc()
-	if !checkAuth(w, r) {
-		return
-	}
 	switch r.URL.Path {
 	case "/health":
 		w.Header().Set("Content-Type", "text/plain")
 		w.Write([]byte("OK"))
 		return
-	case "/metrics":
-		startTime := time.Now()
-		metricsRequests.Inc()
-		w.Header().Set("Content-Type", "text/plain")
-		writePrometheusMetrics(w)
-		metricsHandlerDuration.UpdateDuration(startTime)
+	case "/ping":
+		// This is needed for compatibility with Influx agents.
+		// See https://docs.influxdata.com/influxdb/v1.7/tools/api/#ping-http-endpoint
+		status := http.StatusNoContent
+		if verbose := r.FormValue("verbose"); verbose == "true" {
+			status = http.StatusOK
+		}
+		w.WriteHeader(status)
 		return
 	case "/favicon.ico":
 		faviconRequests.Inc()
 		w.WriteHeader(http.StatusNoContent)
 		return
+	case "/metrics":
+		metricsRequests.Inc()
+		if len(*metricsAuthKey) > 0 && r.FormValue("authKey") != *metricsAuthKey {
+			http.Error(w, "The provided authKey doesn't match -metricsAuthKey", http.StatusUnauthorized)
+			return
+		}
+		startTime := time.Now()
+		w.Header().Set("Content-Type", "text/plain")
+		writePrometheusMetrics(w)
+		metricsHandlerDuration.UpdateDuration(startTime)
+		return
 	default:
 		if strings.HasPrefix(r.URL.Path, "/debug/pprof/") {
 			pprofRequests.Inc()
+			if len(*pprofAuthKey) > 0 && r.FormValue("authKey") != *pprofAuthKey {
+				http.Error(w, "The provided authKey doesn't match -pprofAuthKey", http.StatusUnauthorized)
+				return
+			}
 			DisableResponseCompression(w)
 			pprofHandler(r.URL.Path[len("/debug/pprof/"):], w, r)
 			return
 		}
 
+		if !checkBasicAuth(w, r) {
+			return
+		}
 		if rh(w, r) {
 			return
 		}
@@ -190,27 +207,6 @@ func handlerWrapper(w http.ResponseWriter, r *http.Request, rh RequestHandler) {
 		unsupportedRequestErrors.Inc()
 		return
 	}
-}
-
-func checkAuth(w http.ResponseWriter, r *http.Request) bool {
-	path := r.URL.Path
-	if path == "/metrics" && len(*metricsAuthKey) > 0 {
-		authKey := r.FormValue("authKey")
-		if *metricsAuthKey == authKey {
-			return true
-		}
-		http.Error(w, "The provided authKey doesn't match -metricsAuthKey", http.StatusUnauthorized)
-		return false
-	}
-	if strings.HasPrefix(path, "/debug/pprof/") && len(*pprofAuthKey) > 0 {
-		authKey := r.FormValue("authKey")
-		if *pprofAuthKey == authKey {
-			return true
-		}
-		http.Error(w, "The provided authKey doesn't match -pprofAuthKey", http.StatusUnauthorized)
-		return false
-	}
-	return checkBasicAuth(w, r)
 }
 
 func checkBasicAuth(w http.ResponseWriter, r *http.Request) bool {

@@ -19,6 +19,8 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/memory"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/syncwg"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/uint64set"
 )
 
 func maxRowsPerSmallPart() uint64 {
@@ -28,7 +30,7 @@ func maxRowsPerSmallPart() uint64 {
 	// Production data shows that each row occupies ~1 byte in the compressed part.
 	// It is expected no more than defaultPartsToMerge/2 parts exist
 	// in the OS page cache before they are merged into bigger part.
-	// Halft of the remaining RAM must be left for lib/mergeset parts,
+	// Half of the remaining RAM must be left for lib/mergeset parts,
 	// so the maxItems is calculated using the below code:
 	maxRows := uint64(mem) / defaultPartsToMerge
 	if maxRows < 10e6 {
@@ -59,6 +61,11 @@ const defaultPartsToMerge = 15
 // write amplification.
 const finalPartsToMerge = 3
 
+// The number of shards for rawRow entries per partition.
+//
+// Higher number of shards reduces CPU contention and increases the max bandwidth on multi-core systems.
+var rawRowsShardsPerPartition = (runtime.GOMAXPROCS(-1) + 7) / 8
+
 // getMaxRowsPerPartition returns the maximum number of rows that haven't been converted into parts yet.
 func getMaxRawRowsPerPartition() int {
 	maxRawRowsPerPartitionOnce.Do(func() {
@@ -69,7 +76,7 @@ func getMaxRawRowsPerPartition() int {
 		if n > 500e3 {
 			n = 500e3
 		}
-		maxRawRowsPerPartition = n
+		maxRawRowsPerPartition = n / rawRowsShardsPerPartition
 	})
 	return maxRawRowsPerPartition
 }
@@ -89,11 +96,27 @@ const inmemoryPartsFlushInterval = 5 * time.Second
 
 // partition represents a partition.
 type partition struct {
+	// Put atomic counters to the top of struct, so they are aligned to 8 bytes on 32-bit arch.
+	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/212
+
+	activeBigMerges   uint64
+	activeSmallMerges uint64
+	bigMergesCount    uint64
+	smallMergesCount  uint64
+	bigRowsMerged     uint64
+	smallRowsMerged   uint64
+	bigRowsDeleted    uint64
+	smallRowsDeleted  uint64
+
+	smallAssistedMerges uint64
+
+	mergeIdx uint64
+
 	smallPartsPath string
 	bigPartsPath   string
 
 	// The callack that returns deleted metric ids which must be skipped during merge.
-	getDeletedMetricIDs func() map[uint64]struct{}
+	getDeletedMetricIDs func() *uint64set.Set
 
 	// Name is the name of the partition in the form YYYY_MM.
 	name string
@@ -111,18 +134,10 @@ type partition struct {
 	// Contains file-based parts with big number of items.
 	bigParts []*partWrapper
 
-	// rawRowsLock protects rawRows.
-	rawRowsLock sync.Mutex
-
 	// rawRows contains recently added rows that haven't been converted into parts yet.
 	//
 	// rawRows aren't used in search for performance reasons.
-	rawRows []rawRow
-
-	// rawRowsLastFlushTime is the last time rawRows are flushed.
-	rawRowsLastFlushTime time.Time
-
-	mergeIdx uint64
+	rawRows rawRowsShards
 
 	snapshotLock sync.RWMutex
 
@@ -132,29 +147,21 @@ type partition struct {
 	bigPartsMergerWG       sync.WaitGroup
 	rawRowsFlusherWG       sync.WaitGroup
 	inmemoryPartsFlusherWG sync.WaitGroup
-
-	activeBigMerges   uint64
-	activeSmallMerges uint64
-	bigMergesCount    uint64
-	smallMergesCount  uint64
-	bigRowsMerged     uint64
-	smallRowsMerged   uint64
-	bigRowsDeleted    uint64
-	smallRowsDeleted  uint64
-
-	smallAssistedMerges uint64
 }
 
 // partWrapper is a wrapper for the part.
 type partWrapper struct {
+	// Put atomic counters to the top of struct, so they are aligned to 8 bytes on 32-bit arch.
+	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/212
+
+	// The number of references to the part.
+	refCount uint64
+
 	// The part itself.
 	p *part
 
 	// non-nil if the part is inmemoryPart.
 	mp *inmemoryPart
-
-	// The number of references to the part.
-	refCount uint64
 
 	// Whether the part is in merge now.
 	isInMerge bool
@@ -183,7 +190,7 @@ func (pw *partWrapper) decRef() {
 
 // createPartition creates new partition for the given timestamp and the given paths
 // to small and big partitions.
-func createPartition(timestamp int64, smallPartitionsPath, bigPartitionsPath string, getDeletedMetricIDs func() map[uint64]struct{}) (*partition, error) {
+func createPartition(timestamp int64, smallPartitionsPath, bigPartitionsPath string, getDeletedMetricIDs func() *uint64set.Set) (*partition, error) {
 	name := timestampToPartitionName(timestamp)
 	smallPartsPath := filepath.Join(filepath.Clean(smallPartitionsPath), name)
 	bigPartsPath := filepath.Join(filepath.Clean(bigPartitionsPath), name)
@@ -218,7 +225,7 @@ func (pt *partition) Drop() {
 }
 
 // openPartition opens the existing partition from the given paths.
-func openPartition(smallPartsPath, bigPartsPath string, getDeletedMetricIDs func() map[uint64]struct{}) (*partition, error) {
+func openPartition(smallPartsPath, bigPartsPath string, getDeletedMetricIDs func() *uint64set.Set) (*partition, error) {
 	smallPartsPath = filepath.Clean(smallPartsPath)
 	bigPartsPath = filepath.Clean(bigPartsPath)
 
@@ -255,19 +262,19 @@ func openPartition(smallPartsPath, bigPartsPath string, getDeletedMetricIDs func
 	return pt, nil
 }
 
-func newPartition(name, smallPartsPath, bigPartsPath string, getDeletedMetricIDs func() map[uint64]struct{}) *partition {
-	return &partition{
+func newPartition(name, smallPartsPath, bigPartsPath string, getDeletedMetricIDs func() *uint64set.Set) *partition {
+	p := &partition{
 		name:           name,
 		smallPartsPath: smallPartsPath,
 		bigPartsPath:   bigPartsPath,
 
 		getDeletedMetricIDs: getDeletedMetricIDs,
 
-		rawRows: getRawRowsMaxSize().rows,
-
 		mergeIdx: uint64(time.Now().UnixNano()),
 		stopCh:   make(chan struct{}),
 	}
+	p.rawRows.init()
+	return p
 }
 
 // partitionMetrics contains essential metrics for the partition.
@@ -314,10 +321,9 @@ type partitionMetrics struct {
 
 // UpdateMetrics updates m with metrics from pt.
 func (pt *partition) UpdateMetrics(m *partitionMetrics) {
-	pt.rawRowsLock.Lock()
-	m.PendingRows += uint64(len(pt.rawRows))
-	m.SmallRowsCount += uint64(len(pt.rawRows))
-	pt.rawRowsLock.Unlock()
+	rawRowsLen := uint64(pt.rawRows.Len())
+	m.PendingRows += rawRowsLen
+	m.SmallRowsCount += rawRowsLen
 
 	pt.partsLock.Lock()
 
@@ -391,29 +397,82 @@ func (pt *partition) AddRows(rows []rawRow) {
 		}
 	}
 
-	// Try adding rows.
-	var rrs []*rawRows
-	pt.rawRowsLock.Lock()
+	pt.rawRows.addRows(pt, rows)
+}
+
+type rawRowsShards struct {
+	lock     sync.Mutex
+	shardIdx int
+
+	// Shards reduce lock contention when adding rows on multi-CPU systems.
+	shards []rawRowsShard
+}
+
+func (rrs *rawRowsShards) init() {
+	rrs.shards = make([]rawRowsShard, rawRowsShardsPerPartition)
+}
+
+func (rrs *rawRowsShards) addRows(pt *partition, rows []rawRow) {
+	rrs.lock.Lock()
+	rrs.shardIdx++
+	if rrs.shardIdx >= len(rrs.shards) {
+		rrs.shardIdx = 0
+	}
+	shard := &rrs.shards[rrs.shardIdx]
+	rrs.lock.Unlock()
+
+	shard.addRows(pt, rows)
+}
+
+func (rrs *rawRowsShards) Len() int {
+	n := 0
+	for i := range rrs.shards[:] {
+		n += rrs.shards[i].Len()
+	}
+	return n
+}
+
+type rawRowsShard struct {
+	lock          sync.Mutex
+	rows          []rawRow
+	lastFlushTime time.Time
+}
+
+func (rrs *rawRowsShard) Len() int {
+	rrs.lock.Lock()
+	n := len(rrs.rows)
+	rrs.lock.Unlock()
+	return n
+}
+
+func (rrs *rawRowsShard) addRows(pt *partition, rows []rawRow) {
+	var rrss []*rawRows
+
+	rrs.lock.Lock()
+	if cap(rrs.rows) == 0 {
+		rrs.rows = getRawRowsMaxSize().rows
+	}
+	maxRowsCount := getMaxRawRowsPerPartition()
 	for {
-		capacity := cap(pt.rawRows) - len(pt.rawRows)
+		capacity := maxRowsCount - len(rrs.rows)
 		if capacity >= len(rows) {
 			// Fast path - rows fit capacity.
-			pt.rawRows = append(pt.rawRows, rows...)
+			rrs.rows = append(rrs.rows, rows...)
 			break
 		}
 
 		// Slow path - rows don't fit capacity.
 		// Fill rawRows to capacity and convert it to a part.
-		pt.rawRows = append(pt.rawRows, rows[:capacity]...)
+		rrs.rows = append(rrs.rows, rows[:capacity]...)
 		rows = rows[capacity:]
 		rr := getRawRowsMaxSize()
-		pt.rawRows, rr.rows = rr.rows, pt.rawRows
-		rrs = append(rrs, rr)
-		pt.rawRowsLastFlushTime = time.Now()
+		rrs.rows, rr.rows = rr.rows, rrs.rows
+		rrss = append(rrss, rr)
+		rrs.lastFlushTime = time.Now()
 	}
-	pt.rawRowsLock.Unlock()
+	rrs.lock.Unlock()
 
-	for _, rr := range rrs {
+	for _, rr := range rrss {
 		pt.addRowsPart(rr.rows)
 		putRawRows(rr)
 	}
@@ -575,7 +634,7 @@ func (pt *partition) MustClose() {
 	startTime = time.Now()
 
 	// Flush raw rows the last time before exit.
-	pt.flushRawRows(nil, true)
+	pt.flushRawRows(true)
 
 	// Flush inmemory parts to disk.
 	var pws []*partWrapper
@@ -629,7 +688,6 @@ func (pt *partition) startRawRowsFlusher() {
 }
 
 func (pt *partition) rawRowsFlusher() {
-	var rawRows []rawRow
 	t := time.NewTimer(rawRowsFlushInterval)
 	for {
 		select {
@@ -638,29 +696,35 @@ func (pt *partition) rawRowsFlusher() {
 		case <-t.C:
 			t.Reset(rawRowsFlushInterval)
 		}
-
-		rawRows = pt.flushRawRows(rawRows[:0], false)
+		pt.flushRawRows(false)
 	}
 }
 
-func (pt *partition) flushRawRows(newRawRows []rawRow, isFinal bool) []rawRow {
-	oldRawRows := newRawRows[:0]
-	mustFlush := false
+func (pt *partition) flushRawRows(isFinal bool) {
+	pt.rawRows.flush(pt, isFinal)
+}
+
+func (rrs *rawRowsShards) flush(pt *partition, isFinal bool) {
+	for i := range rrs.shards[:] {
+		rrs.shards[i].flush(pt, isFinal)
+	}
+}
+
+func (rrs *rawRowsShard) flush(pt *partition, isFinal bool) {
+	var rr *rawRows
 	currentTime := time.Now()
 
-	pt.rawRowsLock.Lock()
-	if isFinal || currentTime.Sub(pt.rawRowsLastFlushTime) > rawRowsFlushInterval {
-		mustFlush = true
-		oldRawRows = pt.rawRows
-		pt.rawRows = newRawRows[:0]
-		pt.rawRowsLastFlushTime = currentTime
+	rrs.lock.Lock()
+	if isFinal || currentTime.Sub(rrs.lastFlushTime) > rawRowsFlushInterval {
+		rr = getRawRowsMaxSize()
+		rrs.rows, rr.rows = rr.rows, rrs.rows
 	}
-	pt.rawRowsLock.Unlock()
+	rrs.lock.Unlock()
 
-	if mustFlush {
-		pt.addRowsPart(oldRawRows)
+	if rr != nil {
+		pt.addRowsPart(rr.rows)
+		putRawRows(rr)
 	}
-	return oldRawRows
 }
 
 func (pt *partition) startInmemoryPartsFlusher() {
@@ -727,7 +791,7 @@ func (pt *partition) mergePartsOptimal(pws []*partWrapper) error {
 	return nil
 }
 
-var mergeWorkers = func() int {
+var mergeWorkersCount = func() int {
 	n := runtime.GOMAXPROCS(-1) / 2
 	if n <= 0 {
 		n = 1
@@ -735,16 +799,47 @@ var mergeWorkers = func() int {
 	return n
 }()
 
+var (
+	bigMergeWorkersCount   = uint64(mergeWorkersCount)
+	smallMergeWorkersCount = uint64(mergeWorkersCount)
+)
+
+var (
+	bigMergeConcurrencyLimitCh   = make(chan struct{}, bigMergeWorkersCount)
+	smallMergeConcurrencyLimitCh = make(chan struct{}, smallMergeWorkersCount)
+)
+
+// SetBigMergeWorkersCount sets the maximum number of concurrent mergers for big blocks.
+//
+// The function must be called before opening or creating any storage.
+func SetBigMergeWorkersCount(n int) {
+	if n <= 0 {
+		// Do nothing
+		return
+	}
+	atomic.StoreUint64(&bigMergeWorkersCount, uint64(n))
+}
+
+// SetSmallMergeWorkersCount sets the maximum number of concurrent mergers for small blocks.
+//
+// The function must be called before opening or creating any storage.
+func SetSmallMergeWorkersCount(n int) {
+	if n <= 0 {
+		// Do nothing
+		return
+	}
+	atomic.StoreUint64(&smallMergeWorkersCount, uint64(n))
+}
+
 func (pt *partition) startMergeWorkers() {
-	for i := 0; i < mergeWorkers; i++ {
+	for i := 0; i < mergeWorkersCount; i++ {
 		pt.smallPartsMergerWG.Add(1)
 		go func() {
 			pt.smallPartsMerger()
 			pt.smallPartsMergerWG.Done()
 		}()
 	}
-
-	for i := 0; i < mergeWorkers; i++ {
+	for i := 0; i < mergeWorkersCount; i++ {
 		pt.bigPartsMergerWG.Add(1)
 		go func() {
 			pt.bigPartsMerger()
@@ -791,7 +886,7 @@ func (pt *partition) partsMerger(mergerFunc func(isFinal bool) error) error {
 		if err != errNothingToMerge {
 			return err
 		}
-		if time.Since(lastMergeTime) > 10*time.Second {
+		if time.Since(lastMergeTime) > 30*time.Second {
 			// We have free time for merging into bigger parts.
 			// This should improve select performance.
 			lastMergeTime = time.Now()
@@ -818,11 +913,11 @@ func maxRowsByPath(path string) uint64 {
 
 	// Calculate the maximum number of rows in the output merge part
 	// by dividing the freeSpace by the number of concurrent
-	// mergeWorkers for big parts.
+	// mergeWorkersCount for big parts.
 	// This assumes each row is compressed into 1 byte. Production
 	// simulation shows that each row usually occupies up to 0.5 bytes,
 	// so this is quite safe assumption.
-	maxRows := freeSpace / uint64(mergeWorkers)
+	maxRows := freeSpace / uint64(mergeWorkersCount)
 	if maxRows > maxRowsPerBigPart {
 		maxRows = maxRowsPerBigPart
 	}
@@ -859,6 +954,11 @@ type freeSpaceEntry struct {
 }
 
 func (pt *partition) mergeBigParts(isFinal bool) error {
+	bigMergeConcurrencyLimitCh <- struct{}{}
+	defer func() {
+		<-bigMergeConcurrencyLimitCh
+	}()
+
 	maxRows := maxRowsByPath(pt.bigPartsPath)
 
 	pt.partsLock.Lock()
@@ -878,10 +978,15 @@ func (pt *partition) mergeBigParts(isFinal bool) error {
 }
 
 func (pt *partition) mergeSmallParts(isFinal bool) error {
+	smallMergeConcurrencyLimitCh <- struct{}{}
+	defer func() {
+		<-smallMergeConcurrencyLimitCh
+	}()
+
 	maxRows := maxRowsByPath(pt.smallPartsPath)
 	if maxRows > maxRowsPerSmallPart() {
 		// The output part may go to big part,
-		// so make sure it as enough space.
+		// so make sure it has enough space.
 		maxBigPartRows := maxRowsByPath(pt.bigPartsPath)
 		if maxRows > maxBigPartRows {
 			maxRows = maxBigPartRows
@@ -1158,13 +1263,10 @@ func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxRows ui
 	sort.Slice(src, func(i, j int) bool {
 		a := &src[i].p.ph
 		b := &src[j].p.ph
-		if a.RowsCount < b.RowsCount {
-			return true
+		if a.RowsCount == b.RowsCount {
+			return a.MinTimestamp > b.MinTimestamp
 		}
-		if a.RowsCount > b.RowsCount {
-			return false
-		}
-		return a.MinTimestamp > b.MinTimestamp
+		return a.RowsCount < b.RowsCount
 	})
 
 	n := maxPartsToMerge
@@ -1178,36 +1280,40 @@ func appendPartsToMerge(dst, src []*partWrapper, maxPartsToMerge int, maxRows ui
 	maxM := float64(0)
 	for i := 2; i <= n; i++ {
 		for j := 0; j <= len(src)-i; j++ {
+			a := src[j : j+i]
 			rowsSum := uint64(0)
-			for _, pw := range src[j : j+i] {
+			for _, pw := range a {
 				rowsSum += pw.p.ph.RowsCount
 			}
 			if rowsSum > maxRows {
-				continue
+				// There is no need in verifying remaining parts with higher number of rows
+				break
 			}
-			m := float64(rowsSum) / float64(src[j+i-1].p.ph.RowsCount)
+			m := float64(rowsSum) / float64(a[len(a)-1].p.ph.RowsCount)
 			if m < maxM {
 				continue
 			}
 			maxM = m
-			pws = src[j : j+i]
+			pws = a
 		}
 	}
 
-	minM := float64(maxPartsToMerge / 2)
-	if minM < 2 {
-		minM = 2
+	minM := float64(maxPartsToMerge) / 2
+	if minM < 1.7 {
+		minM = 1.7
 	}
 	if maxM < minM {
 		// There is no sense in merging parts with too small m.
 		return dst
 	}
-
 	return append(dst, pws...)
 }
 
 func openParts(pathPrefix1, pathPrefix2, path string) ([]*partWrapper, error) {
-	// Verify that the directory for the parts exists.
+	// The path can be missing after restoring from backup, so create it if needed.
+	if err := fs.MkdirAllIfNotExist(path); err != nil {
+		return nil, err
+	}
 	d, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open directory %q: %s", path, err)
@@ -1284,7 +1390,7 @@ func (pt *partition) CreateSnapshotAt(smallPath, bigPath string) error {
 	startTime := time.Now()
 
 	// Flush inmemory data to disk.
-	pt.flushRawRows(nil, true)
+	pt.flushRawRows(true)
 	if _, err := pt.flushInmemoryParts(nil, true); err != nil {
 		return fmt.Errorf("cannot flush inmemory parts: %s", err)
 	}
@@ -1344,6 +1450,12 @@ func (pt *partition) createSnapshot(srcDir, dstDir string) error {
 }
 
 func runTransactions(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, path string) error {
+	// Wait until all the previous pending transaction deletions are finished.
+	pendingTxnDeletionsWG.Wait()
+	
+	// Make sure all the current transaction deletions are finished before exiting.
+	defer pendingTxnDeletionsWG.Wait()
+	
 	txnDir := filepath.Join(path, "txn")
 	d, err := os.Open(txnDir)
 	if err != nil {
@@ -1403,12 +1515,14 @@ func runTransaction(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, txnPath str
 	}
 
 	// Remove old paths. It is OK if certain paths don't exist.
+	var removeWG sync.WaitGroup
 	for _, path := range rmPaths {
 		path, err := validatePath(pathPrefix1, pathPrefix2, path)
 		if err != nil {
 			return fmt.Errorf("invalid path to remove: %s", err)
 		}
-		fs.MustRemoveAll(path)
+		removeWG.Add(1)
+		fs.MustRemoveAllWithDoneCallback(path, removeWG.Done)
 	}
 
 	// Move the new part to new directory.
@@ -1428,11 +1542,12 @@ func runTransaction(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, txnPath str
 			if err := os.Rename(srcPath, dstPath); err != nil {
 				return fmt.Errorf("cannot rename %q to %q: %s", srcPath, dstPath, err)
 			}
-		} else {
-			// Verify dstPath exists.
-			if !fs.IsPathExist(dstPath) {
-				return fmt.Errorf("cannot find both source and destination paths: %q -> %q", srcPath, dstPath)
-			}
+		} else if !fs.IsPathExist(dstPath) {
+			// Emit info message for the expected condition after unclean shutdown on NFS disk.
+			// The dstPath part may be missing because it could be already merged into bigger part
+			// while old source parts for the current txn weren't still deleted due to NFS locks.
+			logger.Infof("cannot find both source and destination paths: %q -> %q; this may be the case after unclean shutdown (OOM, `kill -9`, hard reset) on NFS disk",
+				srcPath, dstPath)
 		}
 	} else {
 		// Just remove srcPath.
@@ -1443,13 +1558,21 @@ func runTransaction(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, txnPath str
 	fs.MustSyncPath(pathPrefix1)
 	fs.MustSyncPath(pathPrefix2)
 
-	// Remove the transaction file.
-	if err := os.Remove(txnPath); err != nil {
-		return fmt.Errorf("cannot remove transaction file: %s", err)
-	}
+	pendingTxnDeletionsWG.Add(1)
+	go func() {
+		defer pendingTxnDeletionsWG.Done()
+		// Remove the transaction file only after all the source paths are deleted.
+		// This is required for NFS mounts. See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/61 .
+		removeWG.Wait()
+		if err := os.Remove(txnPath); err != nil {
+			logger.Errorf("cannot remove transaction file %q: %s", txnPath, err)
+		}
+	}()
 
 	return nil
 }
+
+var pendingTxnDeletionsWG syncwg.WaitGroup
 
 func validatePath(pathPrefix1, pathPrefix2, path string) (string, error) {
 	var err error

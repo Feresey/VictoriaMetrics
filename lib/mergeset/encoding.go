@@ -2,6 +2,7 @@ package mergeset
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -11,10 +12,20 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 )
 
+type byteSliceSorter [][]byte
+
+func (s byteSliceSorter) Len() int { return len(s) }
+func (s byteSliceSorter) Less(i, j int) bool {
+	return string(s[i]) < string(s[j])
+}
+func (s byteSliceSorter) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
+}
+
 type inmemoryBlock struct {
 	commonPrefix []byte
 	data         []byte
-	items        [][]byte
+	items        byteSliceSorter
 }
 
 func (ib *inmemoryBlock) Reset() {
@@ -77,12 +88,9 @@ func (ib *inmemoryBlock) Add(x []byte) bool {
 // It must fit CPU cache size, i.e. 64KB for the current CPUs.
 const maxInmemoryBlockSize = 64 * 1024
 
-func (ib *inmemoryBlock) itemsLess(i, j int) bool {
-	return string(ib.items[i]) < string(ib.items[j])
-}
-
 func (ib *inmemoryBlock) sort() {
-	sort.Slice(ib.items, ib.itemsLess)
+	// Use sort.Sort instead of sort.Slice in order to eliminate memory allocation.
+	sort.Sort(&ib.items)
 	bb := bbPool.Get()
 	b := bytesutil.Resize(bb.B, len(ib.data))
 	b = b[:0]
@@ -120,7 +128,8 @@ func checkMarshalType(mt marshalType) error {
 }
 
 func (ib *inmemoryBlock) isSorted() bool {
-	return sort.SliceIsSorted(ib.items, ib.itemsLess)
+	// Use sort.IsSorted instead of sort.SliceIsSorted in order to eliminate memory allocation.
+	return sort.IsSorted(&ib.items)
 }
 
 // MarshalUnsortedData marshals unsorted items from ib to sb.
@@ -138,6 +147,10 @@ func (ib *inmemoryBlock) MarshalUnsortedData(sb *storageBlock, firstItemDst, com
 	return ib.marshalData(sb, firstItemDst, commonPrefixDst, compressLevel)
 }
 
+var isInTest = func() bool {
+	return strings.HasSuffix(os.Args[0], ".test")
+}()
+
 // MarshalUnsortedData marshals sorted items from ib to sb.
 //
 // It also:
@@ -146,17 +159,22 @@ func (ib *inmemoryBlock) MarshalUnsortedData(sb *storageBlock, firstItemDst, com
 // - returns the number of items encoded including the first item.
 // - returns the marshal type used for the encoding.
 func (ib *inmemoryBlock) MarshalSortedData(sb *storageBlock, firstItemDst, commonPrefixDst []byte, compressLevel int) ([]byte, []byte, uint32, marshalType) {
-	// if !ib.isSorted() {
-	//	logger.Panicf("BUG: %d items must be sorted; items:\n%s", len(ib.items), ib.debugItemsString())
-	// }
+	if isInTest && !ib.isSorted() {
+		logger.Panicf("BUG: %d items must be sorted; items:\n%s", len(ib.items), ib.debugItemsString())
+	}
 	ib.updateCommonPrefix()
 	return ib.marshalData(sb, firstItemDst, commonPrefixDst, compressLevel)
 }
 
 func (ib *inmemoryBlock) debugItemsString() string {
 	var sb strings.Builder
+	var prevItem []byte
 	for i, item := range ib.items {
+		if string(item) < string(prevItem) {
+			fmt.Fprintf(&sb, "!!! the next item is smaller than the previous item !!!\n")
+		}
 		fmt.Fprintf(&sb, "%05d %X\n", i, item)
+		prevItem = item
 	}
 	return sb.String()
 }
@@ -175,7 +193,7 @@ func (ib *inmemoryBlock) marshalData(sb *storageBlock, firstItemDst, commonPrefi
 	firstItemDst = append(firstItemDst, ib.items[0]...)
 	commonPrefixDst = append(commonPrefixDst, ib.commonPrefix...)
 
-	if len(ib.data)-len(ib.commonPrefix)*len(ib.items) < 64 || len(ib.items) < 10 {
+	if len(ib.data)-len(ib.commonPrefix)*len(ib.items) < 64 || len(ib.items) < 2 {
 		// Use plain encoding form small block, since it is cheaper.
 		ib.marshalDataPlain(sb)
 		return firstItemDst, commonPrefixDst, uint32(len(ib.items)), marshalTypePlain

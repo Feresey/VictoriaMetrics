@@ -19,12 +19,36 @@ include deployment/*/Makefile
 clean:
 	rm -rf bin/*
 
-publish: publish-victoria-metrics
+publish: \
+	publish-victoria-metrics \
+	publish-vmbackup \
+	publish-vmrestore
 
-package: package-victoria-metrics
+package: \
+	package-victoria-metrics \
+	package-vmbackup \
+	package-vmrestore
 
-release: victoria-metrics-prod
-	cd bin && tar czf victoria-metrics-$(PKG_TAG).tar.gz victoria-metrics-prod
+vmutils: \
+	vmbackup \
+	vmrestore
+
+release: \
+	release-victoria-metrics \
+	release-vmutils
+
+release-victoria-metrics: victoria-metrics-prod
+	cd bin && tar czf victoria-metrics-$(PKG_TAG).tar.gz victoria-metrics-prod && \
+		sha256sum victoria-metrics-$(PKG_TAG).tar.gz > victoria-metrics-$(PKG_TAG)_checksums.txt
+
+release-vmutils: \
+	vmbackup-prod \
+	vmrestore-prod
+	cd bin && tar czf vmutils-$(PKG_TAG).tar.gz vmbackup-prod vmrestore-prod && \
+		sha256sum vmutils-$(PKG_TAG).tar.gz > vmutils-$(PKG_TAG)_checksums.txt
+
+pprof-cpu:
+	go tool pprof -trim_path=github.com/VictoriaMetrics/VictoriaMetrics@ $(PPROF_FILE)
 
 fmt:
 	GO111MODULE=on gofmt -l -w -s ./lib
@@ -39,13 +63,15 @@ lint: install-golint
 	golint app/...
 
 install-golint:
-	which golint || GO111MODULE=off go get -u github.com/golang/lint/golint
+	which golint || GO111MODULE=off go get -u golang.org/x/lint/golint
 
 errcheck: install-errcheck
 	errcheck -exclude=errcheck_excludes.txt ./lib/...
 	errcheck -exclude=errcheck_excludes.txt ./app/vminsert/...
 	errcheck -exclude=errcheck_excludes.txt ./app/vmselect/...
 	errcheck -exclude=errcheck_excludes.txt ./app/vmstorage/...
+	errcheck -exclude=errcheck_excludes.txt ./app/vmbackup/...
+	errcheck -exclude=errcheck_excludes.txt ./app/vmrestore/...
 
 install-errcheck:
 	which errcheck || GO111MODULE=off go get -u github.com/kisielk/errcheck
@@ -60,6 +86,9 @@ test-pure:
 
 test-full:
 	GO111MODULE=on go test -tags=integration -mod=vendor -coverprofile=coverage.txt -covermode=atomic ./lib/... ./app/...
+
+test-full-386:
+	GO111MODULE=on GOARCH=386 go test -tags=integration -mod=vendor -coverprofile=coverage.txt -covermode=atomic ./lib/... ./app/...
 
 benchmark:
 	GO111MODULE=on go test -mod=vendor -bench=. ./lib/...
@@ -89,7 +118,7 @@ install-qtc:
 
 
 golangci-lint: install-golangci-lint
-	golangci-lint run --exclude '(SA4003|SA1019):' -D errcheck
+	golangci-lint run --exclude '(SA4003|SA1019):' -D errcheck -D structcheck
 
 install-golangci-lint:
 	which golangci-lint || GO111MODULE=off go get -u github.com/golangci/golangci-lint/cmd/golangci-lint

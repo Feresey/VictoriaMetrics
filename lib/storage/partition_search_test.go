@@ -8,6 +8,8 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/uint64set"
 )
 
 func TestPartitionSearch(t *testing.T) {
@@ -184,7 +186,7 @@ func testPartitionSearchEx(t *testing.T, ptt int64, tr TimeRange, partsCount, ma
 		pt.AddRows(rows)
 
 		// Flush just added rows to a separate partition.
-		pt.flushRawRows(nil, true)
+		pt.flushRawRows(true)
 	}
 	testPartitionSearch(t, pt, tsids, tr, rbsExpected, -1)
 	pt.MustClose()
@@ -285,6 +287,6 @@ func testPartitionSearchSerial(pt *partition, tsids []TSID, tr TimeRange, rbsExp
 	return nil
 }
 
-func nilGetDeletedMetricIDs() map[uint64]struct{} {
+func nilGetDeletedMetricIDs() *uint64set.Set {
 	return nil
 }

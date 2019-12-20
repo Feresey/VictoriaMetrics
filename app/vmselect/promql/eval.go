@@ -70,6 +70,9 @@ type EvalConfig struct {
 
 	MayCache bool
 
+	// LookbackDelta is analog to `-query.lookback-delta` from Prometheus.
+	LookbackDelta int64
+
 	timestamps     []int64
 	timestampsOnce sync.Once
 }
@@ -82,6 +85,7 @@ func newEvalConfig(src *EvalConfig) *EvalConfig {
 	ec.Step = src.Step
 	ec.Deadline = src.Deadline
 	ec.MayCache = src.MayCache
+	ec.LookbackDelta = src.LookbackDelta
 
 	// do not copy src.timestamps - they must be generated again.
 	return &ec
@@ -436,7 +440,7 @@ func evalRollupFuncWithSubquery(ec *EvalConfig, name string, rf rollupFunc, re *
 	var step int64
 	if len(re.Step) > 0 {
 		var err error
-		step, err = DurationValue(re.Step, ec.Step)
+		step, err = PositiveDurationValue(re.Step, ec.Step)
 		if err != nil {
 			return nil, err
 		}
@@ -446,7 +450,7 @@ func evalRollupFuncWithSubquery(ec *EvalConfig, name string, rf rollupFunc, re *
 	var window int64
 	if len(re.Window) > 0 {
 		var err error
-		window, err = DurationValue(re.Window, ec.Step)
+		window, err = PositiveDurationValue(re.Window, ec.Step)
 		if err != nil {
 			return nil, err
 		}
@@ -465,7 +469,7 @@ func evalRollupFuncWithSubquery(ec *EvalConfig, name string, rf rollupFunc, re *
 	}
 
 	sharedTimestamps := getTimestamps(ec.Start, ec.End, ec.Step)
-	preFunc, rcs := getRollupConfigs(name, rf, ec.Start, ec.End, ec.Step, window, sharedTimestamps)
+	preFunc, rcs := getRollupConfigs(name, rf, ec.Start, ec.End, ec.Step, window, ec.LookbackDelta, sharedTimestamps)
 	tss := make([]*timeseries, 0, len(tssSQ)*len(rcs))
 	var tssLock sync.Mutex
 	removeMetricGroup := !rollupFuncsKeepMetricGroup[name]
@@ -547,7 +551,7 @@ func evalRollupFuncWithMetricExpr(ec *EvalConfig, name string, rf rollupFunc, me
 	var window int64
 	if len(windowStr) > 0 {
 		var err error
-		window, err = DurationValue(windowStr, ec.Step)
+		window, err = PositiveDurationValue(windowStr, ec.Step)
 		if err != nil {
 			return nil, err
 		}
@@ -586,12 +590,23 @@ func evalRollupFuncWithMetricExpr(ec *EvalConfig, name string, rf rollupFunc, me
 		return tss, nil
 	}
 	sharedTimestamps := getTimestamps(start, ec.End, ec.Step)
-	preFunc, rcs := getRollupConfigs(name, rf, start, ec.End, ec.Step, window, sharedTimestamps)
+	preFunc, rcs := getRollupConfigs(name, rf, start, ec.End, ec.Step, window, ec.LookbackDelta, sharedTimestamps)
 
 	// Verify timeseries fit available memory after the rollup.
 	// Take into account points from tssCached.
 	pointsPerTimeseries := 1 + (ec.End-ec.Start)/ec.Step
-	rollupPoints := mulNoOverflow(pointsPerTimeseries, int64(rssLen*len(rcs)))
+	timeseriesLen := rssLen
+	if iafc != nil {
+		// Incremental aggregates require hold only GOMAXPROCS timeseries in memory.
+		timeseriesLen = runtime.GOMAXPROCS(-1)
+		if iafc.ae.Modifier.Op != "" {
+			// Increase the number of timeseries for non-empty group list: `aggr() by (something)`,
+			// since each group can have own set of time series in memory.
+			// Estimate the number of such groups is lower than 100 :)
+			timeseriesLen *= 100
+		}
+	}
+	rollupPoints := mulNoOverflow(pointsPerTimeseries, int64(timeseriesLen*len(rcs)))
 	rollupMemorySize := mulNoOverflow(rollupPoints, 16)
 	rml := getRollupMemoryLimiter()
 	if !rml.Get(uint64(rollupMemorySize)) {
@@ -689,7 +704,8 @@ func doRollupForTimeseries(rc *rollupConfig, tsDst *timeseries, mnSrc *storage.M
 	tsDst.denyReuse = true
 }
 
-func getRollupConfigs(name string, rf rollupFunc, start, end, step, window int64, sharedTimestamps []int64) (func(values []float64, timestamps []int64), []*rollupConfig) {
+func getRollupConfigs(name string, rf rollupFunc, start, end, step, window int64, lookbackDelta int64, sharedTimestamps []int64) (
+	func(values []float64, timestamps []int64), []*rollupConfig) {
 	preFunc := func(values []float64, timestamps []int64) {}
 	if rollupFuncsRemoveCounterResets[name] {
 		preFunc = func(values []float64, timestamps []int64) {
@@ -705,6 +721,7 @@ func getRollupConfigs(name string, rf rollupFunc, start, end, step, window int64
 			Step:            step,
 			Window:          window,
 			MayAdjustWindow: rollupFuncsMayAdjustWindow[name],
+			LookbackDelta:   lookbackDelta,
 			Timestamps:      sharedTimestamps,
 		}
 	}
