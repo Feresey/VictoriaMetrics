@@ -91,7 +91,7 @@ func openFilePart(path string) (*part, error) {
 	}
 	indexSize := fs.MustFileSize(indexPath)
 
-	itemsPath :=filepath.Join( path, "items.bin")
+	itemsPath := filepath.Join(path, "items.bin")
 	itemsFile, err := fs.OpenReaderAt(itemsPath)
 	if err != nil {
 		metaindexFile.MustClose()
@@ -100,7 +100,7 @@ func openFilePart(path string) (*part, error) {
 	}
 	itemsSize := fs.MustFileSize(itemsPath)
 
-	lensPath :=filepath.Join( path, "lens.bin")
+	lensPath := filepath.Join(path, "lens.bin")
 	lensFile, err := fs.OpenReaderAt(lensPath)
 	if err != nil {
 		metaindexFile.MustClose()

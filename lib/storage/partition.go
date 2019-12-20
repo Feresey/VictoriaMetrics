@@ -1452,10 +1452,10 @@ func (pt *partition) createSnapshot(srcDir, dstDir string) error {
 func runTransactions(txnLock *sync.RWMutex, pathPrefix1, pathPrefix2, path string) error {
 	// Wait until all the previous pending transaction deletions are finished.
 	pendingTxnDeletionsWG.Wait()
-	
+
 	// Make sure all the current transaction deletions are finished before exiting.
 	defer pendingTxnDeletionsWG.Wait()
-	
+
 	txnDir := filepath.Join(path, "txn")
 	d, err := os.Open(txnDir)
 	if err != nil {
@@ -1590,8 +1590,8 @@ func validatePath(pathPrefix1, pathPrefix2, path string) (string, error) {
 	if err != nil {
 		return path, fmt.Errorf("cannot determine absolute path for %q: %s", path, err)
 	}
-	pathPrefix1Dir:=pathPrefix1+string(os.PathSeparator)
-	pathPrefix2Dir:=pathPrefix2+string(os.PathSeparator)
+	pathPrefix1Dir := pathPrefix1 + string(os.PathSeparator)
+	pathPrefix2Dir := pathPrefix2 + string(os.PathSeparator)
 	if !strings.HasPrefix(path, pathPrefix1Dir) && !strings.HasPrefix(path, pathPrefix2Dir) {
 		return path, fmt.Errorf("invalid path %q; must start with either %q or %q", path, pathPrefix1Dir, pathPrefix2Dir)
 	}
