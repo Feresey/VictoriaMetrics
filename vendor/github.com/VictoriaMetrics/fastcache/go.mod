@@ -7,5 +7,3 @@ require (
 	github.com/golang/snappy v0.0.1
 	github.com/stretchr/testify v1.3.0 // indirect
 )
-
-go 1.13
