@@ -8,7 +8,7 @@ import (
 	"syscall"
 )
 
-func mustFadviseRandomRead(f *os.File) {
+func mustFadviseSequentialRead(f *os.File) {
 	filenameW, err := syscall.UTF16PtrFromString(f.Name())
 	if  err != nil {
 		logger.Panicf("FATAL: error conversing filename: %s", err)
