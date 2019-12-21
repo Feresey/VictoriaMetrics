@@ -61,6 +61,9 @@ victoria-metrics-ppc64le:
 victoria-metrics-386:
 	CGO_ENABLED=0 GOOS=linux GOARCH=386 GO111MODULE=on go build -mod=vendor -ldflags "$(GO_BUILDINFO)" -o bin/victoria-metrics-386 ./app/victoria-metrics
 
+victoria-metrics-windows-amd64:
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 GO111MODULE=on go build -mod=vendor -ldflags "$(GO_BUILDINFO)" -o bin/victoria-metrics-amd64.exe ./app/victoria-metrics
+
 victoria-metrics-pure:
 	APP_NAME=victoria-metrics $(MAKE) app-local-pure
 

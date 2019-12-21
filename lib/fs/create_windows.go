@@ -1,8 +1,8 @@
 // +build windows
+
 package fs
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,20 +13,23 @@ import (
 )
 
 var (
-	modkernel32      = syscall.NewLazyDLL("kernel32.dll")
-	procLockFileEx   = modkernel32.NewProc("LockFileEx")
+	modkernel32 = syscall.NewLazyDLL("kernel32.dll")
+	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
+	procLockFileEx = modkernel32.NewProc("LockFileEx")
+	// https://docs.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createeventexw
 	procCreateEventW = modkernel32.NewProc("CreateEventW")
-	getFreeSpace     = modkernel32.NewProc("GetDiskFreeSpaceExW")
-
-	ErrTimeout = errors.New("Timeout")
+	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getdiskfreespaceexw
+	getFreeSpace = modkernel32.NewProc("GetDiskFreeSpaceExW")
 )
 
 const (
-	lockfileExclusiveLock = 2
-	fileFlagNormal        = 0x00000080
+	// The function requests an exclusive lock. Otherwise, it requests a shared lock.
+	lockfileExclusiveLock = 0x00000002
+
+	fileFlagNormal = 0x00000080
 )
 
-func Lock(filename string) (err error) {
+func lock(filename string) (err error) {
 	name, err := syscall.UTF16PtrFromString(filename)
 	if err != nil {
 		return err
@@ -46,30 +49,22 @@ func Lock(filename string) (err error) {
 	if err != nil {
 		return err
 	}
+	// close handle if error returns
 	defer func() {
 		if err != nil {
-			syscall.Close(handle)
+			if err := syscall.Close(handle); err != nil {
+				logger.Errorf("Falied to close handle: %q", err)
+			}
 		}
 	}()
 
-	// creates a structure used to track asynchronous
-	// I/O requests that have been issued
-	event, err := createEvent(nil, true, false, nil)
-	if err != nil {
-		return err
-	}
-	ol := &syscall.Overlapped{HEvent: event}
-	defer syscall.CloseHandle(event)
-	err = lockFileEx(handle, lockfileExclusiveLock, 0, 1, 0, ol)
+	ol, err := newOverlapped()
+	defer func() { _ = syscall.CloseHandle(ol.HEvent) }()
+	err = lockFileEx(handle, ol)
 	if err == nil {
 		return nil
 	}
 
-	// ERROR_IO_PENDING is expected when we're waiting on an asychronous event
-	// to occur.
-	if err != syscall.ERROR_IO_PENDING {
-		return err
-	}
 	s, err := syscall.WaitForSingleObject(ol.HEvent, uint32(syscall.INFINITE))
 
 	switch s {
@@ -81,8 +76,44 @@ func Lock(filename string) (err error) {
 	}
 }
 
-func lockFileEx(h syscall.Handle, flags, reserved, locklow, lockhigh uint32, ol *syscall.Overlapped) (err error) {
-	r1, _, e1 := syscall.Syscall6(procLockFileEx.Addr(), 6, uintptr(h), uintptr(flags), uintptr(reserved), uintptr(locklow), uintptr(lockhigh), uintptr(unsafe.Pointer(ol)))
+func newOverlapped() (ol *syscall.Overlapped, err error) {
+	r0, _, errno := syscall.Syscall6(procCreateEventW.Addr(), 4,
+		// *syscall.SecurityAttributes
+		uintptr(unsafe.Pointer(nil)),
+		// manual reset (bool)
+		uintptr(1),
+		// initial state (bool)
+		uintptr(0),
+		// name (string: *uint16)
+		uintptr(unsafe.Pointer(nil)),
+		// blank params
+		0, 0)
+	overlappedHandle := syscall.Handle(r0)
+	if overlappedHandle == syscall.InvalidHandle {
+		if errno != 0 {
+			err = errno
+		} else {
+			err = syscall.EINVAL
+		}
+		return nil, err
+	}
+	return &syscall.Overlapped{HEvent: overlappedHandle}, nil
+}
+
+func lockFileEx(h syscall.Handle, ol *syscall.Overlapped) (err error) {
+	r1, _, e1 := syscall.Syscall6(procLockFileEx.Addr(), 6,
+		// hFile: handle to the file
+		uintptr(h),
+		//dwFlags: This parameter may be 1 2 3
+		uintptr(lockfileExclusiveLock),
+		// dwReserved: Reserved parameter; must be set to zero.
+		uintptr(0),
+		// nNumberOfBytesToLockHigh: The high-order 32 bits of the length of the byte range to lock.
+		uintptr(1),
+		// nNumberOfBytesToLockLow: The low-order 32 bits of the length of the byte range to lock.
+		uintptr(0),
+		// lpOverlapped: A pointer to an OVERLAPPED structure that the function uses with the locking request.
+		uintptr(unsafe.Pointer(ol)))
 	if r1 == 0 {
 		if e1 != 0 {
 			err = error(e1)
@@ -93,86 +124,39 @@ func lockFileEx(h syscall.Handle, flags, reserved, locklow, lockhigh uint32, ol 
 	return
 }
 
-func createEvent(sa *syscall.SecurityAttributes, manualReset bool, initialState bool, name *uint16) (handle syscall.Handle, err error) {
-	var _p0 uint32
-	if manualReset {
-		_p0 = 1
-	}
-	var _p1 uint32
-	if initialState {
-		_p1 = 1
-	}
-
-	r0, _, e1 := syscall.Syscall6(procCreateEventW.Addr(), 4, uintptr(unsafe.Pointer(sa)), uintptr(_p0), uintptr(_p1), uintptr(unsafe.Pointer(name)), 0, 0)
-	handle = syscall.Handle(r0)
-	if handle == syscall.InvalidHandle {
-		if e1 != 0 {
-			err = error(e1)
-		} else {
-			err = syscall.EINVAL
-		}
-	}
-	return
-}
-
-// func lock(filename string) error {
-// 	err := os.Remove(filename)
-// 	if err != nil && len(err.Error()) > 79 &&
-// 		err.Error()[len(err.Error())-79:] == "The process cannot access the file because it is being used by another process." {
-// 		return ErrFileIsBeingUsed
-// 	}
-// 	if err != nil && len(err.Error()) > 42 &&
-// 		err.Error()[len(err.Error())-42:] != "The system cannot find the file specified." {
-// 		return fmt.Errorf("Remove error: %v", err)
-// 	}
-
-// 	file, err := os.OpenFile(filename, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
-// 	if err != nil && len(err.Error()) > 79 &&
-// 		err.Error()[len(err.Error())-79:] == "The process cannot access the file because it is being used by another process." {
-// 		return ErrFileIsBeingUsed
-// 	}
-// 	if err != nil {
-// 		return fmt.Errorf("OpenFile error: %v", err)
-// 	}
-
-// 	_, err = file.WriteString(strconv.FormatInt(int64(os.Getpid()), 10))
-// 	if err != nil {
-// 		return fmt.Errorf("WriteString error: %v", err)
-// 	}
-
-// 	return nil
-// }
-
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
 func CreateFlockFile(dir string) (*os.File, error) {
 	flockName := filepath.Join(dir, "flock.lock")
 	logger.Infof("file lock on %q", flockName)
 
-	if err := Lock(flockName); err != nil {
-		return nil, fmt.Errorf("cannot acquire lock on file %q: %s", flockName, err)
+	// winlock := fslock.New(flockName)
+	if err := lock(flockName); err != nil {
+		return nil, fmt.Errorf("cannot acquire lock on file %q: %q", flockName, err)
 	}
 
 	flockF, err := os.Open(flockName)
 	if err != nil {
-		return nil, fmt.Errorf("cannot create lock file %q: %s", flockName, err)
+		return nil, fmt.Errorf("cannot create lock file %q: %q", flockName, err)
 	}
 	return flockF, nil
 }
 
 // MustGetFreeSpace returns free space for the given directory path.
 func MustGetFreeSpace(path string) uint64 {
-	lpFreeBytesAvailable := int64(0)
-	lpTotalNumberOfBytes := int64(0)
-	lpTotalNumberOfFreeBytes := int64(0)
-	_, _, err := getFreeSpace.Call(uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(filepath.VolumeName(path)))),
+	lpFreeBytesAvailable := uint64(0)
+	lpTotalNumberOfBytes := uint64(0)
+	lpTotalNumberOfFreeBytes := uint64(0)
+	_, _, err := syscall.Syscall6(getFreeSpace.Addr(), 4,
+		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(filepath.VolumeName(path)))),
 		uintptr(unsafe.Pointer(&lpFreeBytesAvailable)),
 		uintptr(unsafe.Pointer(&lpTotalNumberOfBytes)),
-		uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)))
+		uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)),
+		0, 0)
 
-	if err.Error() != "Success." {
-		fmt.Println("This is error:", err)
-		logger.Panicf("FATAL: cannot  determine free disk space on %q: %#v", path, err)
+	if err != 0 {
+		fmt.Printf("This is error: %q\n", err)
+		logger.Panicf("FATAL: cannot  determine free disk space on %q: %q", path, err)
 	}
-	return uint64(lpFreeBytesAvailable)
+	return lpFreeBytesAvailable
 }

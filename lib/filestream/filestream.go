@@ -282,7 +282,7 @@ func putBufioWriter(bw *bufio.Writer) {
 var bwPool sync.Pool
 
 type streamTracker struct {
-	fd     uintptr
-	offset uint64
-	length uint64
+	fd uintptr
+	// offset uint64
+	// length uint64
 }
