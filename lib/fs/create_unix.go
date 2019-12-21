@@ -1,5 +1,3 @@
-// +build !windows
-
 package fs
 
 import (
@@ -12,30 +10,31 @@ import (
 )
 
 type Fslock struct {
-	FileName string
-	fd       *os.File
+	fd *os.File
 }
 
 func (f *Fslock) Lock() error {
-	flockF, err := os.Create(f.FileName)
-	if err != nil {
-		return fmt.Errorf("cannot create lock file %q: qs", f.FileName, err)
-	}
-	if err := unix.Flock(int(flockF.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return fmt.Errorf("cannot acquire lock on file %q: %q", f.FileName, err)
+	if err := unix.Flock(int(f.fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return fmt.Errorf("cannot acquire lock on file %q: %q", f.fd.Name(), err)
 	}
 	return nil
 }
 
 func (f *Fslock) Unlock() error {
-	f.fd.Close()
-	return nil
+	return f.fd.Close()
 }
+
+func (f *Fslock) FileName() string { return f.fd.Name() }
 
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
 func CreateFlockFile(dir string) (*Fslock, error) {
-	f := &Fslock{FileName: filepath.Join(dir, "flock.lock")}
+	file := filepath.Join(dir, "flock.lock")
+	flockF, err := os.Create(file)
+	if err != nil {
+		return nil, fmt.Errorf("cannot create lock file %q: %q", file, err)
+	}
+	f := &Fslock{fd: flockF}
 	return f, f.Lock()
 }
 
