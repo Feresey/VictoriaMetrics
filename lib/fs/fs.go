@@ -12,8 +12,6 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/filestream"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/metrics"
-	// "github.com/juju/fslock"
-	// "golang.org/x/sys/unix"
 )
 
 // ReadAtCloser is rand-access read interface.
@@ -77,10 +75,6 @@ var (
 
 // MustSyncPath syncs contents of the given path.
 func MustSyncPath(path string) {
-	//! remove
-	if path != filepath.FromSlash(path) {
-		panic(path)
-	}
 	switch runtime.GOOS {
 	case "windows":
 		// dir is not file in windows, so cannot sync dir

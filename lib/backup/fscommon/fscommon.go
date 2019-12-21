@@ -77,7 +77,7 @@ func appendFilesInternal(dst []string, d *os.File) ([]string, error) {
 			// for preventing from concurrent access.
 			continue
 		}
-		path := dir + "/" + name
+		path := filepath.Join(dir, name)
 		if fi.IsDir() {
 			// Process directory
 			dst, err = AppendFiles(dst, path)
@@ -112,13 +112,13 @@ func appendFilesInternal(dst []string, d *os.File) ([]string, error) {
 			if err != nil {
 				return nil, fmt.Errorf("cannot list files at %q from symlink %q: %s", pathReal, path, err)
 			}
-			pathReal += "/"
+			pathReal += string(os.PathSeparator)
 			for i := len(dst); i < len(dstNew); i++ {
 				x := dstNew[i]
 				if !strings.HasPrefix(x, pathReal) {
 					return nil, fmt.Errorf("unexpected prefix for path %q; want %q", x, pathReal)
 				}
-				dstNew[i] = path + "/" + x[len(pathReal):]
+				dstNew[i] = filepath.Join(path, x[len(pathReal):])
 			}
 			dst = dstNew
 			continue
@@ -179,7 +179,7 @@ func removeEmptyDirsInternal(d *os.File) (bool, error) {
 		if name == "." || name == ".." {
 			continue
 		}
-		path := dir + "/" + name
+		path := filepath.Join(dir, name)
 		if fi.IsDir() {
 			// Process directory
 			ok, err := removeEmptyDirs(path)
@@ -250,7 +250,7 @@ func removeEmptyDirsInternal(d *os.File) (bool, error) {
 	}
 	logger.Infof("removing empty dir %q", dir)
 	if hasFlock {
-		flockFilepath := dir + "/flock.lock"
+		flockFilepath := filepath.Join(dir, "flock.lock")
 		if err := os.Remove(flockFilepath); err != nil {
 			return false, fmt.Errorf("cannot remove %q: %s", flockFilepath, err)
 		}

@@ -447,8 +447,8 @@ func openPartitions(smallPartitionsPath, bigPartitionsPath string, getDeletedMet
 	}
 	var pts []*partition
 	for ptName := range ptNames {
-		smallPartsPath := smallPartitionsPath + "/" + ptName
-		bigPartsPath := bigPartitionsPath + "/" + ptName
+		smallPartsPath := filepath.Join(smallPartitionsPath, ptName)
+		bigPartsPath := filepath.Join(bigPartitionsPath, ptName)
 		pt, err := openPartition(smallPartsPath, bigPartsPath, getDeletedMetricIDs)
 		if err != nil {
 			mustClosePartitions(pts)

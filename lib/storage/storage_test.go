@@ -698,7 +698,7 @@ func TestStorageAddRows(t *testing.T) {
 				if err != nil {
 					t.Fatalf("unexpected error: %s", err)
 				}
-			case <-time.After(3 * time.Second):
+			case <-time.After(30 * time.Second):
 				t.Fatalf("timeout")
 			}
 		}

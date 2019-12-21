@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/backup/actions"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/backup/common"
@@ -68,7 +69,7 @@ func newSrcFS() (*fslocal.FS, error) {
 	if len(*snapshotName) == 0 {
 		return nil, fmt.Errorf("`-snapshotName` cannot be empty")
 	}
-	snapshotPath := *storageDataPath + "/snapshots/" + *snapshotName
+	snapshotPath := filepath.Join(*storageDataPath, "snapshots", *snapshotName)
 
 	// Verify the snapshot exists.
 	f, err := os.Open(snapshotPath)

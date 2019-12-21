@@ -150,7 +150,7 @@ func (ph *partHeader) ParseFromPath(partPath string) error {
 
 func (ph *partHeader) Path(tablePath string, suffix uint64) string {
 	tablePath = filepath.Clean(tablePath)
-	return fmt.Sprintf("%s/%d_%d_%016X", tablePath, ph.itemsCount, ph.blocksCount, suffix)
+	return fmt.Sprintf("%s"+string(os.PathSeparator)+"%d_%d_%016X", tablePath, ph.itemsCount, ph.blocksCount, suffix)
 }
 
 func (ph *partHeader) WriteMetadata(partPath string) error {

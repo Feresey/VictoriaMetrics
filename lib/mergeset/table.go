@@ -420,7 +420,7 @@ const convertToV1280FileName = "converted-to-v1.28.0"
 
 func (tb *Table) convertToV1280() {
 	// Convert tag->metricID rows into tag->metricIDs rows when upgrading to v1.28.0+.
-	flagFilePath := tb.path + "/" + convertToV1280FileName
+	flagFilePath := filepath.Join(tb.path, convertToV1280FileName)
 	if fs.IsPathExist(flagFilePath) {
 		// The conversion has been already performed.
 		return
@@ -1001,7 +1001,7 @@ func (tb *Table) CreateSnapshotAt(dstDir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot obtain absolute dir for %q: %s", dstDir, err)
 	}
-	if strings.HasPrefix(dstDir, srcDir+"/") {
+	if strings.HasPrefix(dstDir, srcDir+string(os.PathSeparator)) {
 		return fmt.Errorf("cannot create snapshot %q inside the data dir %q", dstDir, srcDir)
 	}
 
@@ -1032,8 +1032,8 @@ func (tb *Table) CreateSnapshotAt(dstDir string) error {
 		if !fs.IsDirOrSymlink(fi) {
 			switch fn {
 			case convertToV1280FileName:
-				srcPath := srcDir + "/" + fn
-				dstPath := dstDir + "/" + fn
+				srcPath := filepath.Join(srcDir, fn)
+				dstPath := filepath.Join(dstDir, fn)
 				if err := os.Link(srcPath, dstPath); err != nil {
 					return fmt.Errorf("cannot hard link from %q to %q: %s", srcPath, dstPath, err)
 				}
@@ -1068,7 +1068,7 @@ func runTransactions(txnLock *sync.RWMutex, path string) error {
 	// Make sure all the current transaction deletions are finished before exiting.
 	defer pendingTxnDeletionsWG.Wait()
 
-	txnDir := path + "/txn"
+	txnDir := filepath.Join(path, "txn")
 	d, err := os.Open(txnDir)
 	if err != nil {
 		if os.IsNotExist(err) {
