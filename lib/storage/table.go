@@ -24,7 +24,7 @@ type table struct {
 	ptws     []*partitionWrapper
 	ptwsLock sync.Mutex
 
-	flockF *fs.Fslock
+	flockF *fslock.Lock
 
 	stop chan struct{}
 
@@ -89,7 +89,8 @@ func openTable(path string, retentionMonths int, getDeletedMetricIDs func() *uin
 	}
 
 	// Protect from concurrent opens.
-	flockF, err := fs.CreateFlockFile(path)
+	flockF := fslock.New(path+"fslock.lock")
+	err = flockF.Lock()
 	if err != nil {
 		return nil, err
 	}

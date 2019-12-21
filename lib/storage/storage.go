@@ -23,6 +23,7 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/uint64set"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/workingsetcache"
 	"github.com/VictoriaMetrics/fastcache"
+	"github.com/juju/fslock"
 )
 
 const maxRetentionMonths = 12 * 100
@@ -43,7 +44,7 @@ type Storage struct {
 	retentionMonths int
 
 	// lock file for exclusive access to the storage on the given path.
-	flockF *fs.Fslock
+	flockF *fslock.Lock
 
 	idbCurr atomic.Value
 
@@ -107,7 +108,8 @@ func OpenStorage(path string, retentionMonths int) (*Storage, error) {
 	}
 
 	// Protect from concurrent opens.
-	flockF, err := fs.CreateFlockFile(path)
+	flockF := fslock.New(path + "fslock.lock") // .CreateFlockFile(path)
+	err = flockF.Lock()
 	if err != nil {
 		return nil, err
 	}
@@ -475,7 +477,7 @@ func (s *Storage) MustClose() {
 
 	// Release lock file.
 	if err := s.flockF.Unlock(); err != nil {
-		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.FileName(), err)
+		logger.Panicf("FATAL: cannot close lock file %q: %s", "fslock.lock", err)
 	}
 }
 

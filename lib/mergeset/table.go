@@ -12,11 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/juju/fslock"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/fs"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/memory"
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/syncwg"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/syncwggit"
 )
 
 // maxParts is the maximum number of parts in the table.
@@ -96,7 +97,7 @@ type Table struct {
 
 	snapshotLock sync.RWMutex
 
-	flockF *fs.Fslock
+	flockF *fslock.Lock
 
 	stopCh chan struct{}
 
@@ -162,7 +163,8 @@ func OpenTable(path string, flushCallback func(), prepareBlock PrepareBlockCallb
 	}
 
 	// Protect from concurrent opens.
-	flockF, err := fs.CreateFlockFile(path)
+	flockF := fslock.New(path+"lock.lock")
+	err = flockF.Lock()
 	if err != nil {
 		return nil, err
 	}
@@ -257,7 +259,7 @@ func (tb *Table) MustClose() {
 
 	// Release flockF
 	if err := tb.flockF.Unlock(); err != nil {
-		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.FileName(), err)
+		logger.Panicf("FATAL:cannot close %q: %s", "aga", err)
 	}
 }
 

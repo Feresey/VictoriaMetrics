@@ -9,34 +9,34 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-type Fslock struct {
-	fd *os.File
-}
+// type Fslock struct {
+// 	fd *os.File
+// }
 
-func (f *Fslock) Lock() error {
-	if err := unix.Flock(int(f.fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return fmt.Errorf("cannot acquire lock on file %q: %q", f.fd.Name(), err)
-	}
-	return nil
-}
+// func (f *Fslock) Lock() error {
+// 	if err := unix.Flock(int(f.fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+// 		return fmt.Errorf("cannot acquire lock on file %q: %q", f.fd.Name(), err)
+// 	}
+// 	return nil
+// }
 
-func (f *Fslock) Unlock() error {
-	return f.fd.Close()
-}
+// func (f *Fslock) Unlock() error {
+// 	return f.fd.Close()
+// }
 
-func (f *Fslock) FileName() string { return f.fd.Name() }
+// func (f *Fslock) FileName() string { return f.fd.Name() }
 
-// CreateFlockFile creates flock.lock file in the directory dir
-// and returns the handler to the file.
-func CreateFlockFile(dir string) (*Fslock, error) {
-	file := filepath.Join(dir, "flock.lock")
-	flockF, err := os.Create(file)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create lock file %q: %q", file, err)
-	}
-	f := &Fslock{fd: flockF}
-	return f, f.Lock()
-}
+// // CreateFlockFile creates flock.lock file in the directory dir
+// // and returns the handler to the file.
+// func CreateFlockFile(dir string) (*Fslock, error) {
+// 	file := filepath.Join(dir, "flock.lock")
+// 	flockF, err := os.Create(file)
+// 	if err != nil {
+// 		return nil, fmt.Errorf("cannot create lock file %q: %q", file, err)
+// 	}
+// 	f := &Fslock{fd: flockF}
+// 	return f, f.Lock()
+// }
 
 // MustGetFreeSpace returns free space for the given directory path.
 func MustGetFreeSpace(path string) uint64 {
