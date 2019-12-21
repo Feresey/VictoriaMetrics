@@ -43,7 +43,7 @@ type Storage struct {
 	retentionMonths int
 
 	// lock file for exclusive access to the storage on the given path.
-	flockF *os.File
+	flockF *fs.Fslock
 
 	idbCurr atomic.Value
 
@@ -474,8 +474,8 @@ func (s *Storage) MustClose() {
 	s.mustSaveHourMetricIDs(hmPrev, "prev_hour_metric_ids")
 
 	// Release lock file.
-	if err := s.flockF.Close(); err != nil {
-		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.Name(), err)
+	if err := s.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.FileName, err)
 	}
 }
 

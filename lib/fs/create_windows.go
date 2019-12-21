@@ -12,6 +12,12 @@ import (
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 )
 
+// Fslock : lock a file
+type Fslock struct {
+	FileName string
+	handle   syscall.Handle
+}
+
 var (
 	modkernel32 = syscall.NewLazyDLL("kernel32.dll")
 	// https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-lockfileex
@@ -29,8 +35,14 @@ const (
 	fileFlagNormal = 0x00000080
 )
 
-func lock(filename string) (err error) {
-	name, err := syscall.UTF16PtrFromString(filename)
+// Unlock : unlocks a file
+func (f *Fslock) Unlock() error {
+	return syscall.Close(f.handle)
+}
+
+// Lock : locks a file
+func (f *Fslock) Lock() (err error) {
+	name, err := syscall.UTF16PtrFromString(f.FileName)
 	if err != nil {
 		return err
 	}
@@ -38,6 +50,15 @@ func lock(filename string) (err error) {
 	// Open for asynchronous I/O so that we can timeout waiting for the lock.
 	// Also open shared so that other processes can open the file (but will
 	// still need to lock it).
+	// os.IsExist("")
+	file, err := os.Create(f.FileName)
+	if err != nil {
+		return err
+	}
+	err = file.Close()
+	if err != nil {
+		return err
+	}
 	handle, err := syscall.CreateFile(
 		name,
 		syscall.GENERIC_READ,
@@ -49,6 +70,7 @@ func lock(filename string) (err error) {
 	if err != nil {
 		return err
 	}
+	f.handle = handle
 	// close handle if error returns
 	defer func() {
 		if err != nil {
@@ -126,20 +148,9 @@ func lockFileEx(h syscall.Handle, ol *syscall.Overlapped) (err error) {
 
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
-func CreateFlockFile(dir string) (*os.File, error) {
-	flockName := filepath.Join(dir, "flock.lock")
-	logger.Infof("file lock on %q", flockName)
-
-	// winlock := fslock.New(flockName)
-	if err := lock(flockName); err != nil {
-		return nil, fmt.Errorf("cannot acquire lock on file %q: %q", flockName, err)
-	}
-
-	flockF, err := os.Open(flockName)
-	if err != nil {
-		return nil, fmt.Errorf("cannot create lock file %q: %q", flockName, err)
-	}
-	return flockF, nil
+func CreateFlockFile(dir string) (*Fslock, error) {
+	f := &Fslock{FileName: filepath.Join(dir, "flock.lock")}
+	return f, f.Lock()
 }
 
 // MustGetFreeSpace returns free space for the given directory path.
@@ -147,14 +158,19 @@ func MustGetFreeSpace(path string) uint64 {
 	lpFreeBytesAvailable := uint64(0)
 	lpTotalNumberOfBytes := uint64(0)
 	lpTotalNumberOfFreeBytes := uint64(0)
-	_, _, err := syscall.Syscall6(getFreeSpace.Addr(), 4,
-		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(filepath.VolumeName(path)))),
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		logger.Panicf("FATAL: cannot  get absolute path for %q: %q", path, err)
+		return 0
+	}
+	_, _, errno := syscall.Syscall6(getFreeSpace.Addr(), 4,
+		uintptr(unsafe.Pointer(syscall.StringToUTF16Ptr(filepath.VolumeName(absPath)))),
 		uintptr(unsafe.Pointer(&lpFreeBytesAvailable)),
 		uintptr(unsafe.Pointer(&lpTotalNumberOfBytes)),
 		uintptr(unsafe.Pointer(&lpTotalNumberOfFreeBytes)),
 		0, 0)
 
-	if err != 0 {
+	if errno != 0 {
 		fmt.Printf("This is error: %q\n", err)
 		logger.Panicf("FATAL: cannot  determine free disk space on %q: %q", path, err)
 	}

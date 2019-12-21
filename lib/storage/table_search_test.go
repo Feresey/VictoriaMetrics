@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math/rand"
 	"os"
+	"path/filepath"
 	"sort"
 	"testing"
 	"time"
@@ -179,14 +180,14 @@ func testTableSearchEx(t *testing.T, trData, trSearch TimeRange, partitionsCount
 		}
 		return a.Timestamps[0] < b.Timestamps[0]
 	})
-
+	testTable := filepath.FromSlash("./test-table")
 	// Create a table from rowss and test search on it.
-	tb, err := openTable("./test-table", -1, nilGetDeletedMetricIDs)
+	tb, err := openTable(testTable, -1, nilGetDeletedMetricIDs)
 	if err != nil {
 		t.Fatalf("cannot create table: %s", err)
 	}
 	defer func() {
-		if err := os.RemoveAll("./test-table"); err != nil {
+		if err := os.RemoveAll(testTable); err != nil {
 			t.Fatalf("cannot remove table directory: %s", err)
 		}
 	}()
@@ -202,7 +203,7 @@ func testTableSearchEx(t *testing.T, trData, trSearch TimeRange, partitionsCount
 	tb.MustClose()
 
 	// Open the created table and test search on it.
-	tb, err = openTable("./test-table", -1, nilGetDeletedMetricIDs)
+	tb, err = openTable(testTable, -1, nilGetDeletedMetricIDs)
 	if err != nil {
 		t.Fatalf("cannot open table: %s", err)
 	}

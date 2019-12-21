@@ -24,7 +24,7 @@ type table struct {
 	ptws     []*partitionWrapper
 	ptwsLock sync.Mutex
 
-	flockF *os.File
+	flockF *fs.Fslock
 
 	stop chan struct{}
 
@@ -207,8 +207,8 @@ func (tb *table) MustClose() {
 	}
 
 	// Release exclusive lock on the table.
-	if err := tb.flockF.Close(); err != nil {
-		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.Name(), err)
+	if err := tb.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.FileName, err)
 	}
 }
 

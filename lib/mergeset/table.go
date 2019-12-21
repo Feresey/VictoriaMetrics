@@ -96,7 +96,7 @@ type Table struct {
 
 	snapshotLock sync.RWMutex
 
-	flockF *os.File
+	flockF *fs.Fslock
 
 	stopCh chan struct{}
 
@@ -256,8 +256,8 @@ func (tb *Table) MustClose() {
 	}
 
 	// Release flockF
-	if err := tb.flockF.Close(); err != nil {
-		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.Name(), err)
+	if err := tb.flockF.Unlock(); err != nil {
+		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.FileName, err)
 	}
 }
 
