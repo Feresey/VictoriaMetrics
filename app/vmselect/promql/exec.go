@@ -11,23 +11,13 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/app/vmselect/netstorage"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/metricsql"
 	"github.com/VictoriaMetrics/metrics"
 )
 
 var logSlowQueryDuration = flag.Duration("search.logSlowQueryDuration", 5*time.Second, "Log queries with execution time exceeding this value. Zero disables slow query logging")
 
 var slowQueries = metrics.NewCounter(`vm_slow_queries_total`)
-
-// ExpandWithExprs expands WITH expressions inside q and returns the resulting
-// PromQL without WITH expressions.
-func ExpandWithExprs(q string) (string, error) {
-	e, err := parsePromQLWithCache(q)
-	if err != nil {
-		return "", err
-	}
-	buf := e.AppendString(nil)
-	return string(buf), nil
-}
 
 // Exec executes q for the given ec.
 func Exec(ec *EvalConfig, q string, isFirstPointOnly bool) ([]netstorage.Result, error) {
@@ -85,12 +75,12 @@ func Exec(ec *EvalConfig, q string, isFirstPointOnly bool) ([]netstorage.Result,
 	return result, err
 }
 
-func maySortResults(e expr, tss []*timeseries) bool {
+func maySortResults(e metricsql.Expr, tss []*timeseries) bool {
 	if len(tss) > 100 {
 		// There is no sense in sorting a lot of results
 		return false
 	}
-	fe, ok := e.(*funcExpr)
+	fe, ok := e.(*metricsql.FuncExpr)
 	if !ok {
 		return true
 	}
@@ -154,10 +144,10 @@ func removeNaNs(tss []*timeseries) []*timeseries {
 	return rvs
 }
 
-func parsePromQLWithCache(q string) (expr, error) {
+func parsePromQLWithCache(q string) (metricsql.Expr, error) {
 	pcv := parseCacheV.Get(q)
 	if pcv == nil {
-		e, err := parsePromQL(q)
+		e, err := metricsql.Parse(q)
 		pcv = &parseCacheValue{
 			e:   e,
 			err: err,
@@ -189,7 +179,7 @@ var parseCacheV = func() *parseCache {
 const parseCacheMaxLen = 10e3
 
 type parseCacheValue struct {
-	e   expr
+	e   metricsql.Expr
 	err error
 }
 

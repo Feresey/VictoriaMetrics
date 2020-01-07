@@ -2,6 +2,7 @@
 
 VictoriaMetrics implements MetricsQL - query language inspired by [PromQL](https://prometheus.io/docs/prometheus/latest/querying/basics/).
 It is backwards compatible with PromQL, so Grafana dashboards backed by Prometheus datasource should work the same after switching from Prometheus to VictoriaMetrics.
+[Standalone MetricsQL package](https://godoc.org/github.com/VictoriaMetrics/VictoriaMetrics/lib/metricsql) can be used for parsing MetricsQL in external apps.
 
 The following functionality is implemented differently in MetricsQL comparing to PromQL in order to improve user experience:
 * MetricsQL takes into account the previous point before the window in square brackets for range functions such as `rate` and `increase`.
@@ -78,6 +79,11 @@ This functionality can be tried at [an editable Grafana dashboard](http://play-g
 - `increases_over_time(m[d])` and `decreases_over_time(m[d])` - returns the number of `m` increases or decreases over the given duration `d`.
 - `prometheus_buckets(q)` - converts [VictoriaMetrics histogram](https://godoc.org/github.com/VictoriaMetrics/metrics#Histogram) buckets to Prometheus buckets with `le` labels.
 - `histogram(q)` - calculates aggregate histogram over `q` time series for each point on the graph. See [this article](https://medium.com/@valyala/improving-histogram-usability-for-prometheus-and-grafana-bc7e5df0e350) for more details.
+- `histogram_over_time(m[d])` - calculates [VictoriaMetrics histogram](https://godoc.org/github.com/VictoriaMetrics/metrics#Histogram) for `m` over `d`.
+  For example, the following query calculates median temperature by country over the last 24 hours:
+  `histogram_quantile(0.5, sum(histogram_over_time(temperature[24h])) by (vmbucket, country))`.
+- `histogram_share(le, buckets)` - returns share (in the range 0..1) for `buckets`. Useful for calculating SLI and SLO.
+  For instance, the following query returns the share of requests which are performed under 1.5 seconds: `histogram_share(1.5, sum(request_duration_seconds_bucket) by (le))`.
 - `topk_*` and `bottomk_*` aggregate functions, which return up to K time series. Note that the standard `topk` function may return more than K time series -
    see [this article](https://www.robustperception.io/graph-top-n-time-series-in-grafana) for details.
    - `topk_min(k, q)` - returns top K time series with the max minimums on the given time range
@@ -88,3 +94,7 @@ This functionality can be tried at [an editable Grafana dashboard](http://play-g
    - `bottomk_max(k, q)` - returns bottom K time series with the min maximums on the given time range
    - `bottomk_avg(k, q)` - returns bottom K time series with the min averages on the given time range
    - `bottomk_median(k, q)` - returns bottom K time series with the min medians on the given time range
+- `share_le_over_time(m[d], le)` - returns share (in the range 0..1) of values in `m` over `d`, which are smaller or equal to `le`. Useful for calculating SLI and SLO.
+  Example: `share_le_over_time(memory_usage_bytes[24h], 100*1024*1024)` returns the share of time series values for the last 24 hours when memory usage was below or equal to 100MB.
+- `share_gt_over_time(m[d], gt)` - returns share (in the range 0..1) of values in `m` over `d`, which are bigger than `gt`. Useful for calculating SLI and SLO.
+  Example: `share_gt_over_time(up[24h], 0)` - returns service availability for the last 24 hours.

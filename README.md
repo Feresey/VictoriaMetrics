@@ -38,9 +38,11 @@ Cluster version is available [here](https://github.com/VictoriaMetrics/VictoriaM
 * High data compression, so [up to 70x more data points](https://medium.com/@valyala/when-size-matters-benchmarking-victoriametrics-vs-timescale-and-influxdb-6035811952d4)
   may be crammed into limited storage comparing to TimescaleDB.
 * Optimized for storage with high-latency IO and low IOPS (HDD and network storage in AWS, Google Cloud, Microsoft Azure, etc). See [graphs from these benchmarks](https://medium.com/@valyala/high-cardinality-tsdb-benchmarks-victoriametrics-vs-timescaledb-vs-influxdb-13e6ee64dd6b).
-* A single-node VictoriaMetrics may substitute moderately sized clusters built with competing solutions such as Thanos, Uber M3, Cortex, InfluxDB or TimescaleDB.
-  See [vertical scalability benchmarks](https://medium.com/@valyala/measuring-vertical-scalability-for-time-series-databases-in-google-cloud-92550d78d8ae)
-  and [comparing Thanos to VictoriaMetrics cluster](https://medium.com/@valyala/comparing-thanos-to-victoriametrics-cluster-b193bea1683).
+* A single-node VictoriaMetrics may substitute moderately sized clusters built with competing solutions such as Thanos, M3DB, Cortex, InfluxDB or TimescaleDB.
+  See [vertical scalability benchmarks](https://medium.com/@valyala/measuring-vertical-scalability-for-time-series-databases-in-google-cloud-92550d78d8ae),
+  [comparing Thanos to VictoriaMetrics cluster](https://medium.com/@valyala/comparing-thanos-to-victoriametrics-cluster-b193bea1683)
+  and [Remote Write Storage Wars](https://promcon.io/2019-munich/talks/remote-write-storage-wars/) talk
+  from [PromCon 2019](https://promcon.io/2019-munich/talks/remote-write-storage-wars/).
 * Easy operation:
   * VictoriaMetrics consists of a single [small executable](https://medium.com/@valyala/stripping-dependency-bloat-in-victoriametrics-docker-image-983fb5912b0d) without external dependencies.
   * All the configuration is done via explicit command-line flags with reasonable defaults.
@@ -136,14 +138,13 @@ It is recommended setting up [monitoring](#monitoring) for VictoriaMetrics.
 
 ### Prometheus setup
 
-Add the following lines to Prometheus config file (it is usually located at `/etc/prometheus/prometheus.yml`):
+Prometheus must be configured with [remote_write](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#remote_write) 
+in order to send data to VictoriaMetrics. Add the following lines 
+to Prometheus config file (it is usually located at `/etc/prometheus/prometheus.yml`):
 
 ```yml
 remote_write:
   - url: http://<victoriametrics-addr>:8428/api/v1/write
-    queue_config:
-      max_samples_per_send: 10000
-      max_shards: 30
 ```
 
 Substitute `<victoriametrics-addr>` with the hostname or IP address of VictoriaMetrics.
@@ -170,6 +171,22 @@ This instructs Prometheus to add `datacenter=dc-123` label to each time series s
 The label name may be arbitrary - `datacenter` is just an example. The label value must be unique
 across Prometheus instances, so those time series may be filtered and grouped by this label.
 
+For highly loaded Prometheus instances (400k+ samples per second)
+the following tuning may be applied:
+```
+remote_write:
+  - url: http://<victoriametrics-addr>:8428/api/v1/write
+    queue_config:
+      max_samples_per_send: 10000
+      capacity: 20000
+      max_shards: 30
+```
+
+Using remote write increases memory usage for Prometheus up to ~25%
+and depends on the shape of data. If you are experiencing issues with
+too high memory consumption try to lower `max_samples_per_send` 
+and `capacity` params (keep in mind that these two params are tightly connected).
+Read more about tuning remote write for Prometheus [here](https://prometheus.io/docs/practices/remote_write).
 
 It is recommended upgrading Prometheus to [v2.12.0](https://github.com/prometheus/prometheus/releases) or newer,
 since the previous versions may have issues with `remote_write`.
@@ -544,6 +561,15 @@ Each JSON line would contain data for a single time series. An example output:
 Optional `start` and `end` args may be added to the request in order to limit the time frame for the exported data. These args may contain either
 unix timestamp in seconds or [RFC3339](https://www.ietf.org/rfc/rfc3339.txt) values.
 
+Pass `Accept-Encoding: gzip` HTTP header in the request to `/api/v1/export` in order to reduce network bandwidth during exporing big amounts
+of time series data. This enables gzip compression for the exported data. Example for exporting gzipped data:
+
+```
+curl -H 'Accept-Encoding: gzip' http://localhost:8428/api/v1/export -d 'match[]={__name__!=""}' > data.jsonl.gz
+```
+
+The maximum duration for each request to `/api/v1/export` is limited by `-search.maxExportDuration` command-line flag.
+
 Exported data can be imported via POST'ing it to [/api/v1/import](#how-to-import-time-series-data).
 
 
@@ -562,10 +588,20 @@ The most efficient protocol for importing data into VictoriaMetrics is `/api/v1/
 
 ```
 # Export the data from <source-victoriametrics>:
-curl -s 'http://source-victoriametrics:8428/api/v1/export' -d 'match={__name__!=""}' > exported_data.jsonl
+curl http://source-victoriametrics:8428/api/v1/export -d 'match={__name__!=""}' > exported_data.jsonl
 
 # Import the data to <destination-victoriametrics>:
-curl -X POST 'http://destination-victoriametrics:8428/api/v1/import' -T exported_data.jsonl
+curl -X POST http://destination-victoriametrics:8428/api/v1/import -T exported_data.jsonl
+```
+
+Pass `Content-Encoding: gzip` HTTP request header to `/api/v1/import` for importing gzipped data:
+
+```
+# Export gzipped data from <source-victoriametrics>:
+curl -H 'Accept-Encoding: gzip' http://source-victoriametrics:8428/api/v1/export -d 'match={__name__!=""}' > exported_data.jsonl.gz
+
+# Import gzipped data to <destination-victoriametrics>:
+curl -X POST -H 'Content-Encoding: gzip' http://destination-victoriametrics:8428/api/v1/import -T exported_data.jsonl.gz
 ```
 
 Each request to `/api/v1/import` can load up to a single vCPU core on VictoriaMetrics. Import speed can be improved by splitting the original file into smaller parts
@@ -694,8 +730,10 @@ horizontally scalable long-term remote storage for really large Prometheus deplo
 
 ### Alerting
 
-VictoriaMetrics doesn't support rule evaluation and alerting yet, so these actions must be performed either
-on [Prometheus side](https://prometheus.io/docs/alerting/overview/) or on [Grafana side](https://grafana.com/docs/alerting/rules/).
+VictoriaMetrics doesn't support rule evaluation and alerting yet, so these actions can be performed at the following places:
+* At Prometheus - see [the corresponding docs](https://prometheus.io/docs/alerting/overview/).
+* At Promxy - see [the corresponding docs](https://github.com/jacksontj/promxy/blob/master/README.md#how-do-i-use-alertingrecording-rules-in-promxy).
+* At Grafana - see [the corresponding docs](https://grafana.com/docs/alerting/rules/).
 
 
 ### Security

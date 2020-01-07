@@ -8,6 +8,8 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/decimal"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
+	"github.com/VictoriaMetrics/metrics"
 	"github.com/valyala/histogram"
 )
 
@@ -23,9 +25,9 @@ var rollupFuncs = map[string]newRollupFunc{
 	"holt_winters":       newRollupHoltWinters,
 	"idelta":             newRollupFuncOneArg(rollupIdelta),
 	"increase":           newRollupFuncOneArg(rollupIncrease), // + rollupFuncsRemoveCounterResets
-	"irate":              newRollupFuncOneArg(rollupIderiv),   // + rollupFuncsRemoveCounterResets
+	"irate":              newRollupFuncOneArg(rollupIrate),    // + rollupFuncsRemoveCounterResets
 	"predict_linear":     newRollupPredictLinear,
-	"rate":               newRollupFuncOneArg(rollupDerivFast), // + rollupFuncsRemoveCounterResets
+	"rate":               newRollupFuncOneArg(rollupRate), // + rollupFuncsRemoveCounterResets
 	"resets":             newRollupFuncOneArg(rollupResets),
 	"avg_over_time":      newRollupFuncOneArg(rollupAvg),
 	"min_over_time":      newRollupFuncOneArg(rollupMin),
@@ -35,6 +37,7 @@ var rollupFuncs = map[string]newRollupFunc{
 	"quantile_over_time": newRollupQuantile,
 	"stddev_over_time":   newRollupFuncOneArg(rollupStddev),
 	"stdvar_over_time":   newRollupFuncOneArg(rollupStdvar),
+	"absent_over_time":   newRollupFuncOneArg(rollupAbsent),
 
 	// Additional rollup funcs.
 	"sum2_over_time":      newRollupFuncOneArg(rollupSum2),
@@ -49,6 +52,9 @@ var rollupFuncs = map[string]newRollupFunc{
 	"lifetime":            newRollupFuncOneArg(rollupLifetime),
 	"lag":                 newRollupFuncOneArg(rollupLag),
 	"scrape_interval":     newRollupFuncOneArg(rollupScrapeInterval),
+	"share_le_over_time":  newRollupShareLE,
+	"share_gt_over_time":  newRollupShareGT,
+	"histogram_over_time": newRollupFuncOneArg(rollupHistogram),
 	"rollup":              newRollupFuncOneArg(rollupFake),
 	"rollup_rate":         newRollupFuncOneArg(rollupFake), // + rollupFuncsRemoveCounterResets
 	"rollup_deriv":        newRollupFuncOneArg(rollupFake),
@@ -103,20 +109,22 @@ func getRollupFunc(funcName string) newRollupFunc {
 	return rollupFuncs[funcName]
 }
 
-func isRollupFunc(funcName string) bool {
-	return getRollupFunc(funcName) != nil
-}
-
 type rollupFuncArg struct {
 	prevValue     float64
 	prevTimestamp int64
 	values        []float64
 	timestamps    []int64
 
-	currTimestamp int64
-	idx           int
-	step          int64
+	currTimestamp  int64
+	idx            int
+	step           int64
+	scrapeInterval int64
+
+	// Real previous value even if it is located too far from the current window.
+	// It matches prevValue if prevValue is not nan.
 	realPrevValue float64
+
+	tsm *timeseriesMap
 }
 
 func (rfa *rollupFuncArg) reset() {
@@ -127,7 +135,9 @@ func (rfa *rollupFuncArg) reset() {
 	rfa.currTimestamp = 0
 	rfa.idx = 0
 	rfa.step = 0
+	rfa.scrapeInterval = 0
 	rfa.realPrevValue = nan
+	rfa.tsm = nil
 }
 
 // rollupFunc must return rollup value for the given rfa.
@@ -166,6 +176,54 @@ var (
 // The maximum interval without previous rows.
 const maxSilenceInterval = 5 * 60 * 1000
 
+type timeseriesMap struct {
+	origin    *timeseries
+	labelName string
+	h         metrics.Histogram
+	m         map[string]*timeseries
+}
+
+func newTimeseriesMap(funcName string, sharedTimestamps []int64, mnSrc *storage.MetricName) *timeseriesMap {
+	if funcName != "histogram_over_time" {
+		return nil
+	}
+
+	values := make([]float64, len(sharedTimestamps))
+	for i := range values {
+		values[i] = nan
+	}
+	var origin timeseries
+	origin.MetricName.CopyFrom(mnSrc)
+	origin.MetricName.ResetMetricGroup()
+	origin.Timestamps = sharedTimestamps
+	origin.Values = values
+	return &timeseriesMap{
+		origin:    &origin,
+		labelName: "vmrange",
+		m:         make(map[string]*timeseries),
+	}
+}
+
+func (tsm *timeseriesMap) AppendTimeseriesTo(dst []*timeseries) []*timeseries {
+	for _, ts := range tsm.m {
+		dst = append(dst, ts)
+	}
+	return dst
+}
+
+func (tsm *timeseriesMap) GetOrCreateTimeseries(labelValue string) *timeseries {
+	ts := tsm.m[labelValue]
+	if ts != nil {
+		return ts
+	}
+	ts = &timeseries{}
+	ts.CopyFromShallowTimestamps(tsm.origin)
+	ts.MetricName.RemoveTag(tsm.labelName)
+	ts.MetricName.AddTag(tsm.labelName, labelValue)
+	tsm.m[labelValue] = ts
+	return ts
+}
+
 // Do calculates rollups for the given timestamps and values, appends
 // them to dstValues and returns results.
 //
@@ -173,8 +231,19 @@ const maxSilenceInterval = 5 * 60 * 1000
 //
 // timestamps must cover time range [rc.Start - rc.Window - maxSilenceInterval ... rc.End + rc.Step].
 //
-// Cannot be called from concurrent goroutines.
+// Do cannot be called from concurrent goroutines.
 func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []int64) []float64 {
+	return rc.doInternal(dstValues, nil, values, timestamps)
+}
+
+// DoTimeseriesMap calculates rollups for the given timestamps and values and puts them to tsm.
+func (rc *rollupConfig) DoTimeseriesMap(tsm *timeseriesMap, values []float64, timestamps []int64) {
+	ts := getTimeseries()
+	ts.Values = rc.doInternal(ts.Values[:0], tsm, values, timestamps)
+	putTimeseries(ts)
+}
+
+func (rc *rollupConfig) doInternal(dstValues []float64, tsm *timeseriesMap, values []float64, timestamps []int64) []float64 {
 	// Sanity checks.
 	if rc.Step <= 0 {
 		logger.Panicf("BUG: Step must be bigger than 0; got %d", rc.Step)
@@ -192,7 +261,8 @@ func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []i
 	// Extend dstValues in order to remove mallocs below.
 	dstValues = decimal.ExtendFloat64sCapacity(dstValues, len(rc.Timestamps))
 
-	maxPrevInterval := getMaxPrevInterval(timestamps)
+	scrapeInterval := getScrapeInterval(timestamps)
+	maxPrevInterval := getMaxPrevInterval(scrapeInterval)
 	if rc.LookbackDelta > 0 && maxPrevInterval > rc.LookbackDelta {
 		maxPrevInterval = rc.LookbackDelta
 	}
@@ -206,7 +276,9 @@ func (rc *rollupConfig) Do(dstValues []float64, values []float64, timestamps []i
 	rfa := getRollupFuncArg()
 	rfa.idx = 0
 	rfa.step = rc.Step
+	rfa.scrapeInterval = scrapeInterval
 	rfa.realPrevValue = nan
+	rfa.tsm = tsm
 
 	i := 0
 	j := 0
@@ -296,7 +368,7 @@ func binarySearchInt64(a []int64, v int64) uint {
 	return i
 }
 
-func getMaxPrevInterval(timestamps []int64) int64 {
+func getScrapeInterval(timestamps []int64) int64 {
 	if len(timestamps) < 2 {
 		return int64(maxSilenceInterval)
 	}
@@ -312,30 +384,34 @@ func getMaxPrevInterval(timestamps []int64) int64 {
 		h.Update(float64(ts - tsPrev))
 		tsPrev = ts
 	}
-	d := int64(h.Quantile(0.6))
+	scrapeInterval := int64(h.Quantile(0.6))
 	histogram.PutFast(h)
-	if d <= 0 {
+	if scrapeInterval <= 0 {
 		return int64(maxSilenceInterval)
 	}
-	// Increase d more for smaller scrape intervals in order to hide possible gaps
+	return scrapeInterval
+}
+
+func getMaxPrevInterval(scrapeInterval int64) int64 {
+	// Increase scrapeInterval more for smaller scrape intervals in order to hide possible gaps
 	// when high jitter is present.
 	// See https://github.com/VictoriaMetrics/VictoriaMetrics/issues/139 .
-	if d <= 2*1000 {
-		return d + 4*d
+	if scrapeInterval <= 2*1000 {
+		return scrapeInterval + 4*scrapeInterval
 	}
-	if d <= 4*1000 {
-		return d + 2*d
+	if scrapeInterval <= 4*1000 {
+		return scrapeInterval + 2*scrapeInterval
 	}
-	if d <= 8*1000 {
-		return d + d
+	if scrapeInterval <= 8*1000 {
+		return scrapeInterval + scrapeInterval
 	}
-	if d <= 16*1000 {
-		return d + d/2
+	if scrapeInterval <= 16*1000 {
+		return scrapeInterval + scrapeInterval/2
 	}
-	if d <= 32*1000 {
-		return d + d/4
+	if scrapeInterval <= 32*1000 {
+		return scrapeInterval + scrapeInterval/4
 	}
-	return d + d/8
+	return scrapeInterval + scrapeInterval/8
 }
 
 func removeCounterResets(values []float64) {
@@ -522,6 +598,56 @@ func linearRegression(rfa *rollupFuncArg) (float64, float64) {
 	return v, k
 }
 
+func newRollupShareLE(args []interface{}) (rollupFunc, error) {
+	return newRollupShareFilter(args, countFilterLE)
+}
+
+func countFilterLE(values []float64, le float64) int {
+	n := 0
+	for _, v := range values {
+		if v <= le {
+			n++
+		}
+	}
+	return n
+}
+
+func newRollupShareGT(args []interface{}) (rollupFunc, error) {
+	return newRollupShareFilter(args, countFilterGT)
+}
+
+func countFilterGT(values []float64, gt float64) int {
+	n := 0
+	for _, v := range values {
+		if v > gt {
+			n++
+		}
+	}
+	return n
+}
+
+func newRollupShareFilter(args []interface{}, countFilter func(values []float64, limit float64) int) (rollupFunc, error) {
+	if err := expectRollupArgsNum(args, 2); err != nil {
+		return nil, err
+	}
+	limits, err := getScalar(args[1], 1)
+	if err != nil {
+		return nil, err
+	}
+	rf := func(rfa *rollupFuncArg) float64 {
+		// There is no need in handling NaNs here, since they must be cleaned up
+		// before calling rollup funcs.
+		values := rfa.values
+		if len(values) == 0 {
+			return nan
+		}
+		limit := limits[rfa.idx]
+		n := countFilter(values, limit)
+		return float64(n) / float64(len(values))
+	}
+	return rf, nil
+}
+
 func newRollupQuantile(args []interface{}) (rollupFunc, error) {
 	if err := expectRollupArgsNum(args, 2); err != nil {
 		return nil, err
@@ -551,6 +677,21 @@ func newRollupQuantile(args []interface{}) (rollupFunc, error) {
 		return qv
 	}
 	return rf, nil
+}
+
+func rollupHistogram(rfa *rollupFuncArg) float64 {
+	values := rfa.values
+	tsm := rfa.tsm
+	tsm.h.Reset()
+	for _, v := range values {
+		tsm.h.Update(v)
+	}
+	idx := rfa.idx
+	tsm.h.VisitNonZeroBuckets(func(vmrange string, count uint64) {
+		ts := tsm.GetOrCreateTimeseries(vmrange)
+		ts.Values[idx] = float64(count)
+	})
+	return nan
 }
 
 func rollupAvg(rfa *rollupFuncArg) float64 {
@@ -653,6 +794,13 @@ func rollupGeomean(rfa *rollupFuncArg) float64 {
 	return math.Pow(p, 1/float64(len(values)))
 }
 
+func rollupAbsent(rfa *rollupFuncArg) float64 {
+	if len(rfa.values) == 0 {
+		return 1
+	}
+	return nan
+}
+
 func rollupCount(rfa *rollupFuncArg) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
@@ -716,16 +864,8 @@ func rollupDeltaInternal(rfa *rollupFuncArg, canUseRealPrevValue bool) float64 {
 		if len(values) == 0 {
 			return nan
 		}
-		if len(values) == 1 {
-			if canUseRealPrevValue && !math.IsNaN(rfa.realPrevValue) {
-				// Fix against removeCounterResets.
-				return values[0] - rfa.realPrevValue
-			}
-			// Assume that the previous non-existing value was 0.
-			return values[0]
-		}
-		prevValue = values[0]
-		values = values[1:]
+		// Assume that the previous non-existing value was 0.
+		prevValue = getPrevValue(rfa, canUseRealPrevValue)
 	}
 	if len(values) == 0 {
 		// Assume that the value didn't change on the given interval.
@@ -766,6 +906,14 @@ func rollupDerivSlow(rfa *rollupFuncArg) float64 {
 }
 
 func rollupDerivFast(rfa *rollupFuncArg) float64 {
+	return rollupDerivFastInternal(rfa, false)
+}
+
+func rollupRate(rfa *rollupFuncArg) float64 {
+	return rollupDerivFastInternal(rfa, true)
+}
+
+func rollupDerivFastInternal(rfa *rollupFuncArg, canUseRealPrevValue bool) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
 	values := rfa.values
@@ -773,16 +921,13 @@ func rollupDerivFast(rfa *rollupFuncArg) float64 {
 	prevValue := rfa.prevValue
 	prevTimestamp := rfa.prevTimestamp
 	if math.IsNaN(prevValue) {
-		if len(values) < 2 {
-			// It is impossible to calculate derivative on 0 or 1 values.
+		if len(values) == 0 {
 			return nan
 		}
-		prevValue = values[0]
-		prevTimestamp = timestamps[0]
-		values = values[1:]
-		timestamps = timestamps[1:]
-	}
-	if len(values) == 0 {
+		// Assume that the value changed from 0 to the current value during rfa.scrapeInterval
+		prevValue = getPrevValue(rfa, canUseRealPrevValue)
+		prevTimestamp = timestamps[0] - rfa.scrapeInterval
+	} else if len(values) == 0 {
 		// Assume that the value didn't change on the given interval.
 		return 0
 	}
@@ -794,16 +939,30 @@ func rollupDerivFast(rfa *rollupFuncArg) float64 {
 }
 
 func rollupIderiv(rfa *rollupFuncArg) float64 {
+	return rollupIderivInternal(rfa, false)
+}
+
+func rollupIrate(rfa *rollupFuncArg) float64 {
+	return rollupIderivInternal(rfa, true)
+}
+
+func rollupIderivInternal(rfa *rollupFuncArg, canUseRealPrevValue bool) float64 {
 	// There is no need in handling NaNs here, since they must be cleaned up
 	// before calling rollup funcs.
 	values := rfa.values
 	timestamps := rfa.timestamps
 	if len(values) < 2 {
-		if len(values) == 0 || math.IsNaN(rfa.prevValue) {
-			// It is impossible to calculate derivative on 0 or 1 values.
+		if len(values) == 0 {
 			return nan
 		}
-		return (values[0] - rfa.prevValue) / (float64(timestamps[0]-rfa.prevTimestamp) * 1e-3)
+		prevValue := rfa.prevValue
+		prevTimestamp := rfa.prevTimestamp
+		if math.IsNaN(prevValue) {
+			// Assume that the value changed from 0 to the current value during rfa.scrapeInterval.
+			prevValue = getPrevValue(rfa, canUseRealPrevValue)
+			prevTimestamp = timestamps[0] - rfa.scrapeInterval
+		}
+		return (values[0] - prevValue) / (float64(timestamps[0]-prevTimestamp) * 1e-3)
 	}
 	vEnd := values[len(values)-1]
 	tEnd := timestamps[len(timestamps)-1]
@@ -828,6 +987,14 @@ func rollupIderiv(rfa *rollupFuncArg) float64 {
 	dv := vEnd - vStart
 	dt := tEnd - tStart
 	return dv / (float64(dt) * 1e-3)
+}
+
+func getPrevValue(rfa *rollupFuncArg, canUseRealPrevValue bool) float64 {
+	prevValue := rfa.realPrevValue
+	if !canUseRealPrevValue || math.IsNaN(prevValue) {
+		return 0
+	}
+	return prevValue
 }
 
 func rollupLifetime(rfa *rollupFuncArg) float64 {

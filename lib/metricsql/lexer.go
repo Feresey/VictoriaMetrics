@@ -1,11 +1,9 @@
-package promql
+package metricsql
 
 import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"github.com/VictoriaMetrics/VictoriaMetrics/lib/logger"
 )
 
 type lexer struct {
@@ -222,7 +220,7 @@ func scanIdent(s string) string {
 		}
 	}
 	if i == 0 {
-		logger.Panicf("BUG: scanIdent couldn't find a single ident char; make sure isIdentPrefix called before scanIdent")
+		panic("BUG: scanIdent couldn't find a single ident char; make sure isIdentPrefix called before scanIdent")
 	}
 	return s[:i]
 }
@@ -281,7 +279,7 @@ func toHex(n byte) byte {
 	return 'a' + (n - 10)
 }
 
-func appendEscapedIdent(dst, s []byte) []byte {
+func appendEscapedIdent(dst []byte, s string) []byte {
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
 		if isIdentChar(ch) {

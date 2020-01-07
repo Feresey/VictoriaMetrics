@@ -12,6 +12,7 @@ import (
 
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/bytesutil"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/decimal"
+	"github.com/VictoriaMetrics/VictoriaMetrics/lib/metricsql"
 	"github.com/VictoriaMetrics/VictoriaMetrics/lib/storage"
 	"github.com/valyala/histogram"
 )
@@ -92,6 +93,7 @@ var transformFuncs = map[string]transformFunc{
 	"asin":               newTransformFuncOneArg(transformAsin),
 	"acos":               newTransformFuncOneArg(transformAcos),
 	"prometheus_buckets": transformPrometheusBuckets,
+	"histogram_share":    transformHistogramShare,
 }
 
 func getTransformFunc(s string) transformFunc {
@@ -99,13 +101,9 @@ func getTransformFunc(s string) transformFunc {
 	return transformFuncs[s]
 }
 
-func isTransformFunc(s string) bool {
-	return getTransformFunc(s) != nil
-}
-
 type transformFuncArg struct {
 	ec   *EvalConfig
-	fe   *funcExpr
+	fe   *metricsql.FuncExpr
 	args [][]*timeseries
 }
 
@@ -126,7 +124,7 @@ func newTransformFuncOneArg(tf func(v float64) float64) transformFunc {
 	}
 }
 
-func doTransformValues(arg []*timeseries, tf func(values []float64), fe *funcExpr) ([]*timeseries, error) {
+func doTransformValues(arg []*timeseries, tf func(values []float64), fe *metricsql.FuncExpr) ([]*timeseries, error) {
 	name := strings.ToLower(fe.Name)
 	keepMetricGroup := transformFuncsKeepMetricGroup[name]
 	for _, ts := range arg {
@@ -149,28 +147,10 @@ func transformAbsent(tfa *transformFuncArg) ([]*timeseries, error) {
 		return nil, err
 	}
 	arg := args[0]
-
 	if len(arg) == 0 {
-		// Copy tags from arg
-		rvs := evalNumber(tfa.ec, 1)
-		rv := rvs[0]
-		me, ok := tfa.fe.Args[0].(*metricExpr)
-		if !ok {
-			return rvs, nil
-		}
-		for i := range me.TagFilters {
-			tf := &me.TagFilters[i]
-			if len(tf.Key) == 0 {
-				continue
-			}
-			if tf.IsRegexp || tf.IsNegative {
-				continue
-			}
-			rv.MetricName.AddTagBytes(tf.Key, tf.Value)
-		}
+		rvs := getAbsentTimeseries(tfa.ec, tfa.fe.Args[0])
 		return rvs, nil
 	}
-
 	for _, ts := range arg {
 		ts.MetricName.ResetMetricGroup()
 		for i, v := range ts.Values {
@@ -183,6 +163,28 @@ func transformAbsent(tfa *transformFuncArg) ([]*timeseries, error) {
 		}
 	}
 	return arg, nil
+}
+
+func getAbsentTimeseries(ec *EvalConfig, arg metricsql.Expr) []*timeseries {
+	// Copy tags from arg
+	rvs := evalNumber(ec, 1)
+	rv := rvs[0]
+	me, ok := arg.(*metricsql.MetricExpr)
+	if !ok {
+		return rvs
+	}
+	tfs := toTagFilters(me.LabelFilters)
+	for i := range tfs {
+		tf := &tfs[i]
+		if len(tf.Key) == 0 {
+			continue
+		}
+		if tf.IsRegexp || tf.IsNegative {
+			continue
+		}
+		rv.MetricName.AddTagBytes(tf.Key, tf.Value)
+	}
+	return rvs
 }
 
 func transformCeil(v float64) float64 {
@@ -398,6 +400,105 @@ func vmrangeBucketsToLE(tss []*timeseries) []*timeseries {
 	return rvs
 }
 
+func transformHistogramShare(tfa *transformFuncArg) ([]*timeseries, error) {
+	args := tfa.args
+	if len(args) < 2 || len(args) > 3 {
+		return nil, fmt.Errorf("unexpected number of args; got %d; want 2...3", len(args))
+	}
+	les, err := getScalar(args[0], 0)
+	if err != nil {
+		return nil, fmt.Errorf("cannot parse le: %s", err)
+	}
+
+	// Convert buckets with `vmrange` labels to buckets with `le` labels.
+	tss := vmrangeBucketsToLE(args[1])
+
+	// Parse boundsLabel. See https://github.com/prometheus/prometheus/issues/5706 for details.
+	var boundsLabel string
+	if len(args) > 2 {
+		s, err := getString(args[2], 2)
+		if err != nil {
+			return nil, fmt.Errorf("cannot parse boundsLabel (arg #3): %s", err)
+		}
+		boundsLabel = s
+	}
+
+	// Group metrics by all tags excluding "le"
+	m := groupLeTimeseries(tss)
+
+	// Calculate share for les
+
+	share := func(i int, les []float64, xss []leTimeseries) (q, lower, upper float64) {
+		leReq := les[i]
+		if math.IsNaN(leReq) || len(xss) == 0 {
+			return nan, nan, nan
+		}
+		fixBrokenBuckets(i, xss)
+		if leReq < 0 {
+			return 0, 0, 0
+		}
+		if math.IsInf(leReq, 1) {
+			return 1, 1, 1
+		}
+		var vPrev, lePrev float64
+		for _, xs := range xss {
+			v := xs.ts.Values[i]
+			le := xs.le
+			if leReq >= le {
+				vPrev = v
+				lePrev = le
+				continue
+			}
+			// precondition: lePrev <= leReq < le
+			vLast := xss[len(xss)-1].ts.Values[i]
+			lower = vPrev / vLast
+			if math.IsInf(le, 1) {
+				return lower, lower, 1
+			}
+			if lePrev == leReq {
+				return lower, lower, lower
+			}
+			upper = v / vLast
+			q = lower + (v-vPrev)/vLast*(leReq-lePrev)/(le-lePrev)
+			return q, lower, upper
+		}
+		// precondition: leReq > leLast
+		return 1, 1, 1
+	}
+	rvs := make([]*timeseries, 0, len(m))
+	for _, xss := range m {
+		sort.Slice(xss, func(i, j int) bool {
+			return xss[i].le < xss[j].le
+		})
+		dst := xss[0].ts
+		var tsLower, tsUpper *timeseries
+		if len(boundsLabel) > 0 {
+			tsLower = &timeseries{}
+			tsLower.CopyFromShallowTimestamps(dst)
+			tsLower.MetricName.RemoveTag(boundsLabel)
+			tsLower.MetricName.AddTag(boundsLabel, "lower")
+			tsUpper = &timeseries{}
+			tsUpper.CopyFromShallowTimestamps(dst)
+			tsUpper.MetricName.RemoveTag(boundsLabel)
+			tsUpper.MetricName.AddTag(boundsLabel, "upper")
+		}
+		for i := range dst.Values {
+			q, lower, upper := share(i, les, xss)
+			dst.Values[i] = q
+			if len(boundsLabel) > 0 {
+				tsLower.Values[i] = lower
+				tsUpper.Values[i] = upper
+			}
+		}
+		rvs = append(rvs, dst)
+		if len(boundsLabel) > 0 {
+			rvs = append(rvs, tsLower)
+			rvs = append(rvs, tsUpper)
+		}
+	}
+	return rvs, nil
+}
+
 func transformHistogramQuantile(tfa *transformFuncArg) ([]*timeseries, error) {
 	args := tfa.args
 	if len(args) < 2 || len(args) > 3 {
@@ -422,73 +523,35 @@ func transformHistogramQuantile(tfa *transformFuncArg) ([]*timeseries, error) {
 	}
 
 	// Group metrics by all tags excluding "le"
-	type x struct {
-		le float64
-		ts *timeseries
-	}
-	m := make(map[string][]x)
-	bb := bbPool.Get()
-	for _, ts := range tss {
-		tagValue := ts.MetricName.GetTagValue("le")
-		if len(tagValue) == 0 {
-			continue
-		}
-		le, err := strconv.ParseFloat(bytesutil.ToUnsafeString(tagValue), 64)
-		if err != nil {
-			continue
-		}
-		ts.MetricName.ResetMetricGroup()
-		ts.MetricName.RemoveTag("le")
-		bb.B = marshalMetricTagsSorted(bb.B[:0], &ts.MetricName)
-		m[string(bb.B)] = append(m[string(bb.B)], x{
-			le: le,
-			ts: ts,
-		})
-	}
-	bbPool.Put(bb)
+	m := groupLeTimeseries(tss)
 
 	// Calculate quantile for each group in m
 
-	lastNonInf := func(i int, xss []x) float64 {
+	lastNonInf := func(i int, xss []leTimeseries) float64 {
 		for len(xss) > 0 {
 			xsLast := xss[len(xss)-1]
 			v := xsLast.ts.Values[i]
 			if v == 0 {
 				return nan
 			}
-			if !math.IsNaN(v) && !math.IsInf(xsLast.le, 0) {
+			if !math.IsInf(xsLast.le, 0) {
 				return xsLast.le
 			}
 			xss = xss[:len(xss)-1]
 		}
 		return nan
 	}
-	quantile := func(i int, phis []float64, xss []x) (q, lower, upper float64) {
+	quantile := func(i int, phis []float64, xss []leTimeseries) (q, lower, upper float64) {
 		phi := phis[i]
 		if math.IsNaN(phi) {
 			return nan, nan, nan
 		}
-		// Fix broken buckets.
-		// They are already sorted by le, so their values must be in ascending order,
-		// since the next bucket value includes all the previous buckets.
-		vPrev := float64(0)
-		for _, xs := range xss {
-			v := xs.ts.Values[i]
-			if v < vPrev {
-				xs.ts.Values[i] = vPrev
-			} else if !math.IsNaN(v) {
-				vPrev = v
-			}
-		}
-		vLast := nan
-		for len(xss) > 0 {
+		fixBrokenBuckets(i, xss)
+		vLast := float64(0)
+		if len(xss) > 0 {
 			vLast = xss[len(xss)-1].ts.Values[i]
-			if !math.IsNaN(vLast) {
-				break
-			}
-			xss = xss[:len(xss)-1]
 		}
-		if vLast == 0 || math.IsNaN(vLast) {
+		if vLast == 0 {
 			return nan, nan, nan
 		}
 		if phi < 0 {
@@ -498,15 +561,10 @@ func transformHistogramQuantile(tfa *transformFuncArg) ([]*timeseries, error) {
 			return inf, vLast, inf
 		}
 		vReq := vLast * phi
-		vPrev = 0
+		vPrev := float64(0)
 		lePrev := float64(0)
 		for _, xs := range xss {
 			v := xs.ts.Values[i]
-			if math.IsNaN(v) {
-				// Skip NaNs - they may appear if the selected time range
-				// contains multiple different bucket sets.
-				continue
-			}
 			le := xs.le
 			if v <= 0 {
 				// Skip zero buckets.
@@ -563,6 +621,50 @@ func transformHistogramQuantile(tfa *transformFuncArg) ([]*timeseries, error) {
 		}
 	}
 	return rvs, nil
+}
+
+type leTimeseries struct {
+	le float64
+	ts *timeseries
+}
+
+func groupLeTimeseries(tss []*timeseries) map[string][]leTimeseries {
+	m := make(map[string][]leTimeseries)
+	bb := bbPool.Get()
+	for _, ts := range tss {
+		tagValue := ts.MetricName.GetTagValue("le")
+		if len(tagValue) == 0 {
+			continue
+		}
+		le, err := strconv.ParseFloat(bytesutil.ToUnsafeString(tagValue), 64)
+		if err != nil {
+			continue
+		}
+		ts.MetricName.ResetMetricGroup()
+		ts.MetricName.RemoveTag("le")
+		bb.B = marshalMetricTagsSorted(bb.B[:0], &ts.MetricName)
+		m[string(bb.B)] = append(m[string(bb.B)], leTimeseries{
+			le: le,
+			ts: ts,
+		})
+	}
+	bbPool.Put(bb)
+	return m
+}
+
+func fixBrokenBuckets(i int, xss []leTimeseries) {
+	// Fix broken buckets.
+	// They are already sorted by le, so their values must be in ascending order,
+	// since the next bucket includes all the previous buckets.
+	vPrev := float64(0)
+	for _, xs := range xss {
+		v := xs.ts.Values[i]
+		if v < vPrev || math.IsNaN(v) {
+			xs.ts.Values[i] = vPrev
+		} else {
+			vPrev = v
+		}
+	}
 }
 
 func transformHour(t time.Time) int {
@@ -1023,7 +1125,7 @@ func transformLabelTransform(tfa *transformFuncArg) ([]*timeseries, error) {
 		return nil, err
 	}
 
-	r, err := compileRegexp(regex)
+	r, err := metricsql.CompileRegexp(regex)
 	if err != nil {
 		return nil, fmt.Errorf(`cannot compile regex %q: %s`, regex, err)
 	}
@@ -1052,7 +1154,7 @@ func transformLabelReplace(tfa *transformFuncArg) ([]*timeseries, error) {
 		return nil, err
 	}
 
-	r, err := compileRegexpAnchored(regex)
+	r, err := metricsql.CompileRegexpAnchored(regex)
 	if err != nil {
 		return nil, fmt.Errorf(`cannot compile regex %q: %s`, regex, err)
 	}
@@ -1163,7 +1265,7 @@ func transformScalar(tfa *transformFuncArg) ([]*timeseries, error) {
 
 	// Verify whether the arg is a string.
 	// Then try converting the string to number.
-	if se, ok := tfa.fe.Args[0].(*stringExpr); ok {
+	if se, ok := tfa.fe.Args[0].(*metricsql.StringExpr); ok {
 		n, err := strconv.ParseFloat(se.S, 64)
 		if err != nil {
 			n = nan
