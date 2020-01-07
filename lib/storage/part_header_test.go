@@ -1,8 +1,8 @@
 package storage
 
 import (
-	"testing"
 	"path/filepath"
+	"testing"
 )
 
 func TestPartHeaderParseFromPath(t *testing.T) {

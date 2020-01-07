@@ -9,10 +9,12 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// Fslock :
 type Fslock struct {
 	fd *os.File
 }
 
+// Lock :
 func (f *Fslock) Lock() error {
 	if err := unix.Flock(int(f.fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return fmt.Errorf("cannot acquire lock on file %q: %q", f.fd.Name(), err)
@@ -20,10 +22,12 @@ func (f *Fslock) Lock() error {
 	return nil
 }
 
+// Unlock :
 func (f *Fslock) Unlock() error {
 	return f.fd.Close()
 }
 
+// FileName :
 func (f *Fslock) FileName() string { return f.fd.Name() }
 
 // CreateFlockFile creates flock.lock file in the directory dir
