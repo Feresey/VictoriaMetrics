@@ -20,10 +20,6 @@ func mustRemoveAll(path string, done func()) bool {
 		done()
 		return true
 	}
-	if err.Error() == "Sharing violation." {
-		time.Sleep(time.Millisecond)
-		goto remover
-	}
 	if !isTemporaryNFSError(err) {
 		logger.Panicf("FATAL: cannot remove %q: %q", path, err)
 	}
