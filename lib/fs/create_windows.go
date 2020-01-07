@@ -1,3 +1,5 @@
+// +build windows
+
 package fs
 
 import (
@@ -45,18 +47,6 @@ func (f *Fslock) Lock() (err error) {
 		return err
 	}
 
-	// Open for asynchronous I/O so that we can timeout waiting for the lock.
-	// Also open shared so that other processes can open the file (but will
-	// still need to lock it).
-	// os.IsExist("")
-	file, err := os.Create(f.FileName)
-	if err != nil {
-		return err
-	}
-	err = file.Close()
-	if err != nil {
-		return err
-	}
 	handle, err := syscall.CreateFile(
 		name,
 		syscall.GENERIC_READ,
@@ -147,7 +137,15 @@ func lockFileEx(h syscall.Handle, ol *syscall.Overlapped) (err error) {
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
 func CreateFlockFile(dir string) (*Fslock, error) {
-	f := &Fslock{FileName: filepath.Join(dir, "flock.lock")}
+	filename := filepath.Join(dir, "flock.lock")
+	file, err := os.Create(filename)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Close(); err != nil {
+		return nil, err
+	}
+	f := &Fslock{FileName: filename}
 	return f, f.Lock()
 }
 
@@ -158,7 +156,7 @@ func MustGetFreeSpace(path string) uint64 {
 	lpTotalNumberOfFreeBytes := uint64(0)
 	absPath, err := filepath.Abs(path)
 	if err != nil {
-		logger.Panicf("FATAL: cannot  get absolute path for %q: %q", path, err)
+		logger.Panicf("FATAL: cannot get absolute path for %q: %q", path, err)
 		return 0
 	}
 	_, _, errno := syscall.Syscall6(getFreeSpace.Addr(), 4,
@@ -170,7 +168,7 @@ func MustGetFreeSpace(path string) uint64 {
 
 	if errno != 0 {
 		fmt.Printf("This is error: %q\n", err)
-		logger.Panicf("FATAL: cannot  determine free disk space on %q: %q", path, err)
+		logger.Panicf("FATAL: cannot determine free disk space on %q: %q", path, err)
 	}
 	return lpFreeBytesAvailable
 }

@@ -1,3 +1,5 @@
+// +build !windows
+
 package fs
 
 import (
@@ -11,13 +13,14 @@ import (
 
 // Fslock :
 type Fslock struct {
-	fd *os.File
+	FileName string
+	fd       *os.File
 }
 
 // Lock :
 func (f *Fslock) Lock() error {
 	if err := unix.Flock(int(f.fd.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
-		return fmt.Errorf("cannot acquire lock on file %q: %q", f.fd.Name(), err)
+		return fmt.Errorf("cannot acquire lock on file %q: %q", f.FileName, err)
 	}
 	return nil
 }
@@ -27,9 +30,6 @@ func (f *Fslock) Unlock() error {
 	return f.fd.Close()
 }
 
-// FileName :
-func (f *Fslock) FileName() string { return f.fd.Name() }
-
 // CreateFlockFile creates flock.lock file in the directory dir
 // and returns the handler to the file.
 func CreateFlockFile(dir string) (*Fslock, error) {
@@ -38,7 +38,7 @@ func CreateFlockFile(dir string) (*Fslock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cannot create lock file %q: %q", file, err)
 	}
-	f := &Fslock{fd: flockF}
+	f := &Fslock{fd: flockF, FileName: file}
 	return f, f.Lock()
 }
 

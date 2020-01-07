@@ -475,7 +475,7 @@ func (s *Storage) MustClose() {
 
 	// Release lock file.
 	if err := s.flockF.Unlock(); err != nil {
-		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.FileName(), err)
+		logger.Panicf("FATAL: cannot close lock file %q: %s", s.flockF.FileName, err)
 	}
 }
 

@@ -208,7 +208,7 @@ func (tb *table) MustClose() {
 
 	// Release exclusive lock on the table.
 	if err := tb.flockF.Unlock(); err != nil {
-		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.FileName(), err)
+		logger.Panicf("FATAL: cannot release lock on %q: %s", tb.flockF.FileName, err)
 	}
 }
 

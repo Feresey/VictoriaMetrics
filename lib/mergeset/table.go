@@ -257,7 +257,7 @@ func (tb *Table) MustClose() {
 
 	// Release flockF
 	if err := tb.flockF.Unlock(); err != nil {
-		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.FileName(), err)
+		logger.Panicf("FATAL:cannot close %q: %s", tb.flockF.FileName, err)
 	}
 }
 
